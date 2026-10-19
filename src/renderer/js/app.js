@@ -1469,6 +1469,7 @@ function pageJumpControls() {
 function renderTabs() {
   const host = $('#tabStrip');
   host.innerHTML = '';
+  const list = el('div', { class: 'tab-list' });
   state.docs.forEach((d) => {
     const t = el('div', { class: `tab${d.id === state.activeId ? ' active' : ''}${d.dirty ? ' dirty' : ''}` }, [
       el('span', { class: 't-name', text: d.name }),
@@ -1477,8 +1478,12 @@ function renderTabs() {
     x.onclick = async (e) => { e.stopPropagation(); await closeDoc(d.id); };
     t.appendChild(x);
     t.onclick = () => activateDoc(d.id);
-    host.appendChild(t);
+    list.appendChild(t);
   });
+  host.appendChild(list);
+  const add = el('button', { class: 'tab-add', title: 'Open another PDF', html: svgIcon('plus', 14) });
+  add.onclick = () => onMenuAction('file:open');
+  host.appendChild(add);
   updateTitle();
 }
 
@@ -1564,6 +1569,20 @@ export async function openDocFromBytes(bytes, name, path = null, password = null
     setDocError(err.message || 'Failed to open PDF');
     console.error(err);
     return null;
+  }
+}
+
+async function openDroppedFiles(fileList) {
+  const files = Array.from(fileList || []);
+  const pdfs = files.filter((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
+  if (!pdfs.length) {
+    if (files.length) toast('Only PDF files can be opened by dragging.', 'warn');
+    return;
+  }
+  for (const f of pdfs) {
+    const p = window.api.pathForFile ? window.api.pathForFile(f) : '';
+    if (p) await openDocFromPath(p);
+    else await openDocFromBytes(new Uint8Array(await f.arrayBuffer()), f.name);
   }
 }
 
@@ -4732,8 +4751,8 @@ async function onMenuAction(action, payload) {
   const doc = activeDoc();
   switch (action) {
     case 'file:open': {
-      const paths = await window.api.openDialog({});
-      if (paths && paths[0]) await openDocFromPath(paths[0]);
+      const paths = await window.api.openDialog({ multiSelections: true, title: 'Open PDF' });
+      if (paths) for (const p of paths) await openDocFromPath(p);
       break;
     }
     case 'file:openRecent': if (payload) await openDocFromPath(payload); break;
@@ -5130,34 +5149,36 @@ function wireGlobal() {
   $('#findCase').onchange = () => findInput.dispatchEvent(new Event('input'));
   $('#findWord').onchange = () => findInput.dispatchEvent(new Event('input'));
 
-  // Drag & drop
-  const wrap = $('#canvasWrap');
-  ['dragenter', 'dragover'].forEach((ev) => wrap.addEventListener(ev, (e) => {
-    e.preventDefault();
-    if (!document.querySelector('.dropzone')) {
-      const dz = el('div', { class: 'dropzone', text: 'Drop a PDF to open it' });
-      document.body.appendChild(dz);
-    }
-  }));
-  ['dragleave', 'drop'].forEach((ev) => wrap.addEventListener(ev, (e) => {
-    e.preventDefault();
-    if (ev === 'dragleave' && e.relatedTarget && wrap.contains(e.relatedTarget)) return;
+  // Drag & drop — anywhere in the window, any number of PDFs. The overlay is
+  // pointer-events: none (see app.css), so it never swallows the drop itself.
+  const dropzone = (on) => {
     const dz = document.querySelector('.dropzone');
-    if (dz) dz.remove();
-    if (ev === 'drop') {
-      const f = e.dataTransfer.files[0];
-      if (!f) return;
-      // File.path was removed in Electron 32+ — ask the preload bridge
-      // (webUtils.getPathForFile) for the real path, fall back to bytes.
-      const p = window.api.pathForFile ? window.api.pathForFile(f) : '';
-      if (p) openDocFromPath(p);
-      else {
-        const fr = new FileReader();
-        fr.onload = () => openDocFromBytes(new Uint8Array(fr.result), f.name);
-        fr.readAsArrayBuffer(f);
-      }
-    }
-  }));
+    if (on && !dz) document.body.appendChild(el('div', { class: 'dropzone', text: 'Drop PDFs to open them' }));
+    else if (!on && dz) dz.remove();
+  };
+  const isFileDrag = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+  let dragDepth = 0;
+  window.addEventListener('dragenter', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    dragDepth++;
+    dropzone(true);
+  });
+  window.addEventListener('dragover', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  window.addEventListener('dragleave', (e) => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth || e.relatedTarget === null) { dragDepth = 0; dropzone(false); }
+  });
+  window.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    dropzone(false);
+    await openDroppedFiles(e.dataTransfer.files);
+  });
 
   $('#welcomeOpen').onclick = () => onMenuAction('file:open');
   $('#welcomeNew').onclick = () => newBlank();

@@ -645,14 +645,34 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
 
 .tb-tabs {
   display: flex; align-items: flex-end; gap: var(--space-05);
-  height: 100%; flex: 1; overflow: hidden; padding-bottom: var(--space-05);
+  height: 100%; flex: 1; min-width: 0; overflow: hidden; padding-bottom: var(--space-05);
 }
+.tab-list {
+  display: flex; align-items: flex-end; gap: var(--space-05);
+  min-width: 0; overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none;
+}
+.tab-list::-webkit-scrollbar { display: none; }
+
+/* "+" opens another PDF without disturbing the ones already open. */
+.tab-add {
+  --ctl-h: var(--ctl-md);
+  -webkit-app-region: no-drag;
+  flex: none;
+  width: 28px; height: var(--ctl-h);
+  display: grid; place-items: center;
+  padding: 0; border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  color: var(--text-2);
+}
+.tab-add:not(:disabled):hover { background: var(--tool-hover); color: var(--text-1); }
+.tab-add svg { width: 14px; height: 14px; }
 
 /* Document tabs — the serif face marks document identity. */
 .tab {
   --ctl-h: var(--ctl-md);
   -webkit-app-region: no-drag;
   display: flex; align-items: center; gap: var(--space-15);
+  flex: 0 1 auto; min-width: 84px;
   max-width: 230px; height: var(--ctl-h);
   padding: 0 var(--space-15) 0 var(--space-25);
   background: var(--surface-sunken);
@@ -676,6 +696,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
 }
 .tab .t-name {
   overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
   font-family: var(--font-serif);
   font-size: var(--text-base);
   letter-spacing: .1px;
@@ -2319,6 +2340,8 @@ body.tool-editText .textLayer span:hover {
   font-size: var(--text-lg);
   font-weight: var(--weight-semibold);
   color: var(--accent-ink);
+  /* Must never intercept the drop it is advertising. */
+  pointer-events: none;
 }
 
 /* ── OCR & scanned-page indicators ─────────────────────────────────────── */

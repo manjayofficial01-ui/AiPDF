@@ -2,6 +2,7 @@ import { activeDoc, pushHistory, emit, pushStructUndo, canUndoStructure, canRedo
 import { loadPdfBytes, buildPages, relayout, applyLayoutToDom, scrollToPage, renderVisible } from './viewer.js';
 import { loadFileAnnotations, loadAttachments } from './annots.js';
 import { buildPdf, buildExtract, buildMerge } from './pdfwrite.js';
+import { openNativeImagePage, applyNativeImageEdit, closeNativeImageSession } from './image-pdf-browser.mjs';
 import { toast, el } from './util.js';
 import { showModal, formRow } from './dialog.js';
 import { loadFormFields, renderFormFields } from './forms.js';
@@ -66,6 +67,78 @@ async function commitStructure(doc, { toastMsg } = {}) {
   await reloadDocFromBytes(doc, bytes, null);
   pushStructUndo(before);
   if (toastMsg) toast(toastMsg, 'ok');
+}
+
+/* ── Native image placements ────────────────────────────────────────────── */
+
+/** Resolve the same placement across revisions. IDs are session-scoped, so a
+ *  fresh session after a commit must find the image by resource name first,
+ *  then by nearest centre (the same image can be drawn more than once). */
+function pickImage(images, target) {
+  const cx = (target.bounds[0] + target.bounds[2]) / 2;
+  const cy = (target.bounds[1] + target.bounds[3]) / 2;
+  let best = null, bestScore = Infinity;
+  for (const im of images) {
+    if (im.singular) continue;
+    const b = im.bounds;
+    const d = Math.hypot((b[0] + b[2]) / 2 - cx, (b[1] + b[3]) / 2 - cy);
+    const score = d + (im.name === target.name ? 0 : 10000);
+    if (score < bestScore) { best = im; bestScore = score; }
+  }
+  return best;
+}
+
+function imageView(im) {
+  return {
+    name: im.name,
+    bounds: im.bounds.slice(),
+    corners: im.corners.map((p) => p.slice()),
+    matrix: im.matrix.slice(),
+  };
+}
+
+/** Image placements on the exported bytes of one page, so hit-testing sees
+ *  exactly what a save would contain (pending edits included). */
+export async function listNativeImages(pageIndex) {
+  const doc = activeDoc();
+  if (!doc) return [];
+  const bytes = await buildPdf(doc, {});
+  const session = await openNativeImagePage(bytes, pageIndex);
+  try { return session.images.filter((im) => !im.singular).map(imageView); }
+  finally { closeNativeImageSession(session); }
+}
+
+/** Apply one edit to a placement and commit it through the same rebuild +
+ *  structural-undo path as every other document structure change. */
+export async function commitNativeImageEdit(pageIndex, target, change) {
+  const doc = activeDoc();
+  if (!doc) return { ok: false, error: 'No document open' };
+  const before = doc.bytes;
+  let bytes, session;
+  try { bytes = await buildPdf(doc, {}); }
+  catch (e) { return { ok: false, error: String(e?.message || e) }; }
+  try { session = await openNativeImagePage(bytes, pageIndex); }
+  catch (e) { return { ok: false, error: String(e?.message || e) }; }
+  try {
+    const im = pickImage(session.images, target);
+    if (!im) return { ok: false, error: 'That image can no longer be edited on this page' };
+    const candidate = await applyNativeImageEdit(session, im.id, change);
+    await reloadDocFromBytes(doc, candidate, null);
+    pushStructUndo(before);
+    let next = null;
+    if (!change.delete) {
+      const after = await openNativeImagePage(candidate, pageIndex);
+      try {
+        const im2 = pickImage(after.images, { name: im.name, bounds: im.bounds });
+        if (im2) next = imageView(im2);
+      } finally { closeNativeImageSession(after); }
+    }
+    return { ok: true, image: next };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  } finally {
+    closeNativeImageSession(session);
+  }
 }
 
 export async function undoStructure() {

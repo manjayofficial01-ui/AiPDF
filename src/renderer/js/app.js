@@ -18,6 +18,7 @@ import { loadFormFields, renderFormFields, startFieldPlacement, exportFormData, 
 import { watermarkDialog, headerFooterDialog, batesDialog, signatureDialog } from './stamps.js';
 import { deletePages, rotatePages, extractPages, insertBlankAt, insertFromPdfAt, mergeDocuments, splitDocument, splitByBookmarks, splitByBlankPages, duplicatePages, reversePages, replacePageAt, cropPages, undoStructure, redoStructure, reloadDocFromBytes } from './pages.js';
 import { initAI, aiStatusLabel, aiReady, renderAIDock, configureAI, ask, summarize, translate, proofread, rewrite, openAIDock, extractData, outline as aiOutline, aiSelfTest } from './ai.js';
+import { initImageEdit } from './image-edit.js';
 import { openSmartRedact } from './smartredact.js';
 import { runContractReview } from './contract.js';
 import { toggleReadAloud as ttsToggle, stopReadAloud as ttsStop, openTtsSettings } from './tts.js';
@@ -72,6 +73,7 @@ async function boot() {
   initTextEditing();
   initSidebar();
   initAI();
+  initImageEdit();
 
   buildChrome();
   wireToolPair();
@@ -1087,6 +1089,9 @@ const TOOLS = [
   ['formatPainter', 'Format painter', 'copy'], ['eyedropper', 'Colour picker', 'palette'],
   ['eraser', 'Eraser', 'eraser'], ['stamp', 'Stamp', 'stamp'],
   ['image', 'Image', 'image'], ['signature', 'Sign', 'signature'], ['redact', 'Redact', 'redact'],
+  // Select and edit an image already placed on the page (move, resize, rotate,
+  // flip, fade, replace, delete) through the native content-stream editor.
+  ['editImage', 'Edit image', 'crop'],
   ['whiteout', 'Whiteout', 'whiteout'], ['measure', 'Measure', 'measure'],
   // Foxit's full drawing set
   ['roundRect', 'Rounded rect', 'roundRect'], ['polygon', 'Polygon', 'polygon'],
@@ -1162,7 +1167,7 @@ function ribbonGroupsForMode() {
       // Foxit keeps Select + Edit text on Home, so both live here.
       { title: 'Tools', items: [
         // Foxit leads every tab with Hand then Select; Hand pans, Select picks.
-        ...toolButtons(['hand', 'select', 'editText', 'editArea']),
+        ...toolButtons(['hand', 'select', 'editText', 'editArea', 'editImage']),
         { icon: 'link', label: 'Add link', act: () => setTool('link') },
       ] },
       { title: 'Comment & Markup', items: toolButtons(['highlight', 'underline', 'strikeout', 'squiggly', 'note', 'callout', 'textbox', 'areaHighlight']) },
@@ -1238,6 +1243,7 @@ function ribbonGroupsForMode() {
     ];
     case 'Edit': return [
       { title: 'Direct Editor', items: toolButtons(['editText', 'editArea', 'whiteout']) },
+      { title: 'Images', items: toolButtons(['editImage']) },
       { title: 'Links', items: [
         { icon: 'link', label: 'Add link', act: () => setTool('link') },
         { icon: 'trash', label: 'Remove links', act: () => onMenuAction('edit:removeLinks') },

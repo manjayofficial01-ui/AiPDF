@@ -94,6 +94,7 @@ function imageView(im) {
     bounds: im.bounds.slice(),
     corners: im.corners.map((p) => p.slice()),
     matrix: im.matrix.slice(),
+    clipped: !!im.clipped,
   };
 }
 

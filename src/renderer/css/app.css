@@ -2834,3 +2834,13 @@ body.img-edit-busy, body.img-edit-busy * { cursor: progress !important; }
 }
 .img-toolbar button:hover { background: var(--tool-hover); }
 .img-toolbar select { border-color: var(--border); background: var(--surface); padding: 0 4px; }
+.img-crop-armed { cursor: crosshair; }
+.img-crop-armed .img-handle { display: none; }
+.img-readonly { cursor: default; }
+.img-crop-rect {
+  position: absolute; pointer-events: none; z-index: 7;
+  border: 2px dashed var(--accent);
+  background: rgba(var(--accent-rgb), .12);
+}
+.img-crop-note { font-size: var(--text-xs); color: var(--text-2); padding: 0 4px; }
+body.img-crop-mode #pages, body.img-crop-mode .page { cursor: crosshair; }

@@ -23,6 +23,19 @@ let ui = null;               // { page, box, bar, canvas }
 let images = [];
 let cacheKey = '';
 let listPage = -1;
+let cropMode = false;
+let cropRect = null;
+let cropEl = null;
+let cropBar = null;
+// Visible rect of placements already cropped in this session. The adapter
+// reports the full image footprint (the clip is in the content stream), so
+// remember the kept section to draw and hit-test the real visible area.
+const cropVisible = new Map();
+
+function cropKey(i, name) {
+  const doc = activeDoc();
+  return `${doc?.id || ''}|${i}|${name}`;
+}
 
 export function initImageEdit() {
   on('tool', (t) => {
@@ -37,7 +50,14 @@ export function initImageEdit() {
   window.addEventListener('resize', () => { if (target) refreshViewport(); });
   document.addEventListener('pointerdown', onPointerDown, true);
   document.addEventListener('keydown', (e) => {
-    if (active && e.key === 'Escape' && target) {
+    if (!active) return;
+    if (e.key === 'Escape' && cropMode) {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelCrop();
+      return;
+    }
+    if (e.key === 'Escape' && target) {
       e.preventDefault();
       e.stopPropagation();
       clearSelection();
@@ -52,6 +72,7 @@ export function initImageEdit() {
 function dropCache() { images = []; cacheKey = ''; listPage = -1; }
 
 function clearSelection() {
+  cancelCrop();
   target = null;
   vp = null;
   pageIndex = -1;
@@ -102,6 +123,15 @@ function insideQuad(corners, pt) {
 
 async function onPointerDown(e) {
   if (!active || busy || e.button !== 0) return;
+  if (cropMode) {
+    if (e.target.closest('.img-toolbar')) return;
+    const page = e.target.closest('.page');
+    if (!page || Number(page.dataset.i) !== pageIndex) return;
+    e.preventDefault();
+    e.stopPropagation();
+    beginCropDrag(e, page);
+    return;
+  }
   if (e.target.closest('.img-edit-ui')) return;
   const page = e.target.closest('.page');
   if (!page) { clearSelection(); return; }
@@ -115,8 +145,11 @@ async function onPointerDown(e) {
     const pt = toPdf(v, canvas, e.clientX, e.clientY);
     const list = await ensureImages(i);
     if (!pt) return;
-    const hit = list.find((im) => insideQuad(im.corners, pt));
+    let hit = list.find((im) => insideQuad(im.corners, pt));
     if (!hit) { clearSelection(); return; }
+    const key = cropKey(i, hit.name);
+    if (!hit.clipped) cropVisible.delete(key);
+    else if (cropVisible.has(key)) hit = { ...hit, bounds: cropVisible.get(key).slice() };
     pageIndex = i;
     target = hit;
     vp = v;
@@ -155,23 +188,29 @@ function drawSelection() {
   const page = pageFor(pageIndex);
   const canvas = page?.querySelector('canvas.pdf');
   if (!page || !canvas || !target || !vp) return;
+  if (cropMode) cancelCrop();
   removeUi();
   const rect = boundsToCss(vp, canvas, target.bounds);
+  const readOnly = !!target.clipped;
   const box = document.createElement('div');
-  box.className = 'img-edit-ui img-edit-box';
+  box.className = `img-edit-ui img-edit-box${readOnly ? ' img-readonly' : ''}`;
   box.style.left = rect.left + 'px';
   box.style.top = rect.top + 'px';
   box.style.width = rect.width + 'px';
   box.style.height = rect.height + 'px';
-  box.title = `${target.name} — drag to move`;
-  for (const corner of ['nw', 'ne', 'se', 'sw']) {
-    const handle = document.createElement('div');
-    handle.className = `img-edit-ui img-handle img-handle-${corner}`;
-    handle.dataset.corner = corner;
-    handle.addEventListener('pointerdown', (e) => startResize(e, corner));
-    box.appendChild(handle);
+  box.title = readOnly
+    ? `${target.name} — cropped section (delete, or undo to restore)`
+    : `${target.name} — drag to move`;
+  if (!readOnly) {
+    for (const corner of ['nw', 'ne', 'se', 'sw']) {
+      const handle = document.createElement('div');
+      handle.className = `img-edit-ui img-handle img-handle-${corner}`;
+      handle.dataset.corner = corner;
+      handle.addEventListener('pointerdown', (e) => startResize(e, corner));
+      box.appendChild(handle);
+    }
+    box.addEventListener('pointerdown', startMove);
   }
-  box.addEventListener('pointerdown', startMove);
   page.appendChild(box);
 
   const bar = buildToolbar();
@@ -194,6 +233,14 @@ function buildToolbar() {
     bar.appendChild(b);
     return b;
   };
+  if (target?.clipped) {
+    const note = document.createElement('span');
+    note.className = 'img-crop-note';
+    note.textContent = 'Cropped';
+    bar.appendChild(note);
+    button('Delete', 'Remove this image from the page', () => apply({ delete: true }));
+    return bar;
+  }
   button('↺', 'Rotate left 90°', () => apply({ rotation: -90 }));
   button('↻', 'Rotate right 90°', () => apply({ rotation: 90 }));
   button('⇋', 'Flip horizontally', () => apply({ flipX: true }));
@@ -208,10 +255,141 @@ function buildToolbar() {
   }
   opacity.addEventListener('change', () => apply({ opacity: Number(opacity.value) / 100 }));
   bar.appendChild(opacity);
+  button('Crop', 'Keep only a section of this image', startCrop);
   button('Replace', 'Replace this image file', replaceImage);
   button('Delete', 'Remove this image from the page', () => apply({ delete: true }));
   return bar;
 }
+
+/* ── Crop: keep one section of the placement ─────────────────────────────
+ *  The adapter clips the Do invocation to the chosen normalized rectangle,
+ *  so the kept section stays where it was drawn and everything outside it is
+ *  hidden. A clipped placement refuses further native edits, so the UI marks
+ *  it read-only afterwards (undo restores the uncropped image). */
+function startCrop() {
+  if (!target || busy) return;
+  if (target.clipped) { toast('This image is already cropped — undo to change the section.', 'warn'); return; }
+  if (Math.abs(target.matrix[1]) > 1e-6 || Math.abs(target.matrix[2]) > 1e-6) {
+    toast('Cropping a rotated image is not supported yet — undo the rotation first.', 'warn', 6000);
+    return;
+  }
+  cropMode = true;
+  cropRect = null;
+  if (ui) {
+    if (ui.bar) ui.bar.style.display = 'none';
+    ui.box.classList.add('img-crop-armed');
+  }
+  document.body.classList.add('img-crop-mode');
+  toast('Drag over the section of the image to keep.', 'info', 3600);
+}
+
+function exitCrop() {
+  cropMode = false;
+  cropRect = null;
+  document.body.classList.remove('img-crop-mode');
+  cropEl?.remove(); cropEl = null;
+  cropBar?.remove(); cropBar = null;
+}
+
+function cancelCrop() {
+  const wasCropping = cropMode;
+  exitCrop();
+  if (wasCropping && ui) {
+    ui.box?.classList.remove('img-crop-armed');
+    if (ui.bar) ui.bar.style.display = '';
+  }
+}
+
+async function beginCropDrag(e, page) {
+  const canvas = page.querySelector('canvas.pdf');
+  let v = vp;
+  try { v = v || await viewportFor(pageIndex); } catch { return; }
+  if (!v) return;
+  vp = v;
+  const start = toPdf(v, canvas, e.clientX, e.clientY);
+  if (!start) return;
+  cropEl?.remove();
+  cropEl = document.createElement('div');
+  cropEl.className = 'img-edit-ui img-crop-rect';
+  page.appendChild(cropEl);
+  const onMove = (ev) => {
+    const p = toPdf(v, canvas, ev.clientX, ev.clientY);
+    if (!p) return;
+    cropRect = [
+      Math.min(start[0], p[0]), Math.min(start[1], p[1]),
+      Math.max(start[0], p[0]), Math.max(start[1], p[1]),
+    ];
+    positionCrop();
+  };
+  const finish = () => {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', finish);
+    document.removeEventListener('pointercancel', finish);
+    if (!cropRect || cropRect[2] - cropRect[0] < 3 || cropRect[3] - cropRect[1] < 3) return cancelCrop();
+    showCropBar(page);
+  };
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', finish);
+  document.addEventListener('pointercancel', finish);
+}
+
+function positionCrop() {
+  const page = pageFor(pageIndex);
+  const canvas = page?.querySelector('canvas.pdf');
+  if (!cropEl || !canvas || !vp || !cropRect) return;
+  const r = boundsToCss(vp, canvas, cropRect);
+  cropEl.style.left = r.left + 'px';
+  cropEl.style.top = r.top + 'px';
+  cropEl.style.width = r.width + 'px';
+  cropEl.style.height = r.height + 'px';
+}
+
+function showCropBar(page) {
+  cropBar?.remove();
+  const bar = document.createElement('div');
+  bar.className = 'img-edit-ui img-toolbar img-crop-bar';
+  const ok = document.createElement('button');
+  ok.type = 'button'; ok.textContent = 'Apply crop'; ok.title = 'Keep only this section';
+  ok.addEventListener('click', applyCrop);
+  const no = document.createElement('button');
+  no.type = 'button'; no.textContent = 'Cancel'; no.title = 'Cancel cropping';
+  no.addEventListener('click', cancelCrop);
+  bar.append(ok, no);
+  const canvas = page.querySelector('canvas.pdf');
+  if (canvas && vp && cropRect) {
+    const r = boundsToCss(vp, canvas, cropRect);
+    bar.style.left = Math.max(0, r.left) + 'px';
+    bar.style.top = (r.top > 38 ? r.top - 32 : r.top + r.height + 6) + 'px';
+  }
+  page.appendChild(bar);
+  cropBar = bar;
+}
+
+async function applyCrop() {
+  if (!cropRect || !target || busy) return;
+  const m = target.matrix;
+  if (Math.abs(m[1]) > 1e-6 || Math.abs(m[2]) > 1e-6 || !m[0] || !m[3]) {
+    toast('Cropping a rotated image is not supported yet.', 'warn', 6000);
+    return cancelCrop();
+  }
+  const nx0 = (Math.min(cropRect[0], cropRect[2]) - m[4]) / m[0];
+  const nx1 = (Math.max(cropRect[0], cropRect[2]) - m[4]) / m[0];
+  const ny0 = (Math.min(cropRect[1], cropRect[3]) - m[5]) / m[3];
+  const ny1 = (Math.max(cropRect[1], cropRect[3]) - m[5]) / m[3];
+  const l = clamp01(Math.min(nx0, nx1)), r = clamp01(Math.max(nx0, nx1));
+  const b = clamp01(Math.min(ny0, ny1)), t = clamp01(Math.max(ny0, ny1));
+  if (r - l < 0.01 || t - b < 0.01) { toast('Select a larger section.', 'warn'); return; }
+  const visibleBounds = [
+    Math.max(target.bounds[0], Math.min(cropRect[0], cropRect[2])),
+    Math.max(target.bounds[1], Math.min(cropRect[1], cropRect[3])),
+    Math.min(target.bounds[2], Math.max(cropRect[0], cropRect[2])),
+    Math.min(target.bounds[3], Math.max(cropRect[1], cropRect[3])),
+  ];
+  exitCrop();
+  await apply({ crop: [l, b, r, t] }, { visibleBounds });
+}
+
+function clamp01(n) { return Math.max(0, Math.min(1, n)); }
 
 function setBoxBounds(bounds) {
   if (!ui?.box || !ui.canvas || !vp) return;
@@ -327,7 +505,7 @@ function replaceImage() {
   input.click();
 }
 
-async function apply(change) {
+async function apply(change, opts = {}) {
   if (!target || busy) return;
   const pi = pageIndex;
   const sel = target;
@@ -341,6 +519,20 @@ async function apply(change) {
       return;
     }
     if (change.delete) { clearSelection(); toast('Image removed', 'ok'); return; }
+    if (change.crop) {
+      if (result.image) {
+        const bounds = (opts.visibleBounds || result.image.bounds).slice();
+        target = { ...result.image, bounds };
+        pageIndex = pi;
+        vp = await viewportFor(pi);
+        cropVisible.set(cropKey(pi, target.name), bounds.slice());
+        drawSelection();
+      } else {
+        clearSelection();
+      }
+      toast('Section kept. This placement is now cropped — undo to restore the full image.', 'ok', 7000);
+      return;
+    }
     target = result.image;
     pageIndex = pi;
     vp = await viewportFor(pi);

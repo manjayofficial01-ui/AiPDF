@@ -93,7 +93,7 @@ await ev(`window.__it = {
     const { activeDoc } = await import('/js/store.js');
     const { openNativeImagePage, closeNativeImageSession } = await import('/js/image-pdf-browser.mjs');
     const s = await openNativeImagePage(activeDoc().bytes, 0);
-    const out = s.images.map(function (im) { return { name: im.name, bounds: im.bounds, matrix: im.matrix }; });
+    const out = s.images.map(function (im) { return { name: im.name, bounds: im.bounds, matrix: im.matrix, clipped: im.clipped }; });
     closeNativeImageSession(s);
     return out;
   }
@@ -181,6 +181,53 @@ const afterDelete = JSON.parse(await ev(`__it.bounds().then(JSON.stringify)`) ||
 console.log('AFTER_DELETE', JSON.stringify(afterDelete));
 check('delete removes one placement', afterDelete.length === 1, `${afterDelete.length} left`);
 check('selection cleared after delete', !(await ev(`!!document.querySelector('.img-edit-box')`)));
+
+/* 8. Crop the second image down to its left half. */
+const p2 = JSON.parse(await ev(`__it.point(0, 290, 80).then(JSON.stringify)`));
+await mouse('mousePressed', p2.x, p2.y);
+await sleep(40);
+await mouse('mouseReleased', p2.x, p2.y);
+for (let i = 0; i < 30; i++) { await sleep(250); if (await ev(`!!document.querySelector('.img-edit-box')`)) break; }
+const cropBtn = await ev(`(function(){ var b = [...document.querySelectorAll('.img-toolbar button')].find(function(x){ return /^Crop$/.test(x.textContent); }); if (b) b.click(); return b ? 'ok' : 'none'; })()`);
+check('crop button is available', cropBtn === 'ok', String(cropBtn));
+await sleep(300);
+const ca = JSON.parse(await ev(`__it.point(0, 240, 40).then(JSON.stringify)`));
+const cbpt = JSON.parse(await ev(`__it.point(0, 290, 120).then(JSON.stringify)`));
+await mouse('mousePressed', ca.x, ca.y);
+await sleep(50);
+for (let s = 1; s <= 5; s++) { await mouse('mouseMoved', ca.x + ((cbpt.x - ca.x) * s) / 5, ca.y + ((cbpt.y - ca.y) * s) / 5); await sleep(40); }
+await mouse('mouseReleased', cbpt.x, cbpt.y);
+await sleep(500);
+const appliedCrop = await ev(`(function(){ var b = [...document.querySelectorAll('.img-crop-bar button')].find(function(x){ return /Apply crop/.test(x.textContent); }); if (b) b.click(); return b ? 'ok' : 'none'; })()`);
+check('crop confirm bar appears', appliedCrop === 'ok', String(appliedCrop));
+await sleep(3000);
+const croppedList = JSON.parse(await ev(`__it.bounds().then(JSON.stringify)`) || '[]');
+console.log('AFTER_CROP', JSON.stringify(croppedList));
+check('crop commits a clipped placement', croppedList.some((x) => x.clipped), JSON.stringify(croppedList));
+const cropBox = JSON.parse(await ev(`(function(){ var b = document.querySelector('.img-edit-box'); return b ? JSON.stringify({ w: b.getBoundingClientRect().width, h: b.getBoundingClientRect().height, handles: document.querySelectorAll('.img-handle').length }) : null; })()`) || 'null');
+console.log('CROP_BOX', JSON.stringify(cropBox));
+check('cropped selection covers the kept half', !!cropBox && Math.abs(cropBox.w - 50 * ppp) < 8,
+  cropBox ? `${Math.round(cropBox.w)}px vs ${Math.round(50 * ppp)}px` : 'no box');
+
+/* 9. A cropped placement offers delete only — the adapter refuses further
+ *    native edits once the Do invocation carries a clip. */
+await sleep(400);
+const p3 = JSON.parse(await ev(`__it.point(0, 245, 80).then(JSON.stringify)`));
+await mouse('mousePressed', p3.x, p3.y);
+await sleep(40);
+await mouse('mouseReleased', p3.x, p3.y);
+for (let i = 0; i < 30; i++) { await sleep(250); if (await ev(`!!document.querySelector('.img-edit-box')`)) break; }
+console.log('CROPPED_UI', await ev(`(function(){
+  var bar = document.querySelector('.img-toolbar');
+  return JSON.stringify({
+    box: !!document.querySelector('.img-edit-box'),
+    handles: document.querySelectorAll('.img-handle').length,
+    note: (document.querySelector('.img-crop-note') || {}).textContent || null,
+    buttons: bar ? [...bar.querySelectorAll('button')].map(function(b){ return b.textContent; }) : [],
+  });
+})()`));
+check('cropped image has no resize handles', (await ev(`document.querySelectorAll('.img-handle').length`)) === 0);
+check('cropped image offers delete only', await ev(`(function(){ var bar = document.querySelector('.img-toolbar'); if (!bar) return false; var labels = [...bar.querySelectorAll('button')].map(function(b){ return b.textContent; }); return labels.length === 1 && labels[0] === 'Delete'; })()`));
 
 const shot = await send('Page.captureScreenshot', { format: 'png' });
 if (shot?.data) fs.writeFileSync(path.join(ROOT, '.smoke', 'image-tool.png'), Buffer.from(shot.data, 'base64'));

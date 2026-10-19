@@ -1,0 +1,34 @@
+name: Native image adapter checks
+on:
+  push:
+    branches: ['audit/aipdf-agent-hardening-2026-10-19']
+    paths: ['src/renderer/js/image-*.mjs', 'scripts/image-*.mjs', '.github/workflows/native-image-adapter.yml']
+  pull_request:
+    paths: ['src/renderer/js/image-*.mjs', 'scripts/image-*.mjs', '.github/workflows/native-image-adapter.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  image-adapter:
+    if: github.repository == 'Omid-r/AiPDF'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install isolated PDF-library test dependency
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/aipdf-image-deps" --ignore-scripts --no-audit --no-fund --package-lock=false '@cantoo/pdf-lib@2.11.1'
+      - name: Core and PDF save/reopen checks
+        run: |
+          set -euo pipefail
+          export AIPDF_PDF_LIB_ENTRY="$(node -p "require.resolve('@cantoo/pdf-lib',{paths:[process.env.RUNNER_TEMP+'/aipdf-image-deps']})")"
+          node --check src/renderer/js/image-pdf.mjs
+          node --check src/renderer/js/image-pdf-browser.mjs
+          node --check scripts/image-pdf-test.mjs
+          node scripts/image-objects-test.mjs
+          node scripts/image-pdf-test.mjs
+          AIPDF_TEST_BROWSER_BUNDLE=1 node scripts/image-pdf-test.mjs

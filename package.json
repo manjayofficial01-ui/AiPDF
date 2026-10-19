@@ -1,7 +1,7 @@
 {
   "name": "aipdf-editor",
   "productName": "AiPDF Editor",
-  "version": "2.13.0",
+  "version": "2.14.0",
   "description": "AiPDF Editor — a modern Electron-based PDF viewer & editor with AI assistance, contract intelligence, smart redaction, multi-provider read-aloud and an agentic AI bot",
   "main": "src/main/main.js",
   "author": "manjayofficial01-ui",
@@ -64,13 +64,18 @@
       "!dist*/**"
     ],
     "extraResources": [
-      { "from": "vendor/tessdata", "to": "tessdata" }
+      {
+        "from": "vendor/tessdata",
+        "to": "tessdata"
+      }
     ],
     "asarUnpack": [
       "**/tesseract.js-core/**"
     ],
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "icon": "assets/icon.ico",
       "artifactName": "AiPDF-Editor-${version}-setup.${ext}"
     },

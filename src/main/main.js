@@ -33,11 +33,12 @@ const TITLEBAR_OVERLAY_HEIGHT = 36;
 const CAPTION_BUTTON_WIDTH = 46;
 const CAPTION_BUTTONS = 3;
 
-// Atelier surfaces. These must match --bg-app in src/renderer/css/app.css or the
-// window flashes the wrong colour between creation and first paint.
+// Atelier surfaces. These must match --bg-app in the active theme layer
+// (src/renderer/css/theme-claude.css) or the window flashes the wrong colour
+// between creation and first paint.
 const ATELIER = {
-  light: { bg: '#f6f3ee', symbol: '#3a332b' },
-  dark: { bg: '#1a1714', symbol: '#ece6dc' },
+  light: { bg: '#f3eddf', symbol: '#3a332b' },
+  dark: { bg: '#15120e', symbol: '#ece6dc' },
 };
 
 /** Resolve dark/light from the *saved* preference, falling back to the OS. Using

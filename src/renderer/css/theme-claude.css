@@ -1,0 +1,64 @@
+/* Claude-inspired cream & gold layer. Loaded after theme-professional.css so
+   it restyles the palette without disturbing that layer's control sizing and
+   icon rendering. Paper-cream surfaces, deep amber for text-safe accents,
+   gold for fills; the page itself stays white in both themes. */
+:root {
+  --bg-app:#f3eddf; --bg-sunken:#eae2d0;
+  --surface:#fbf7ee; --surface-raised:#fffdf7; --surface-sunken:#f2ebdc;
+
+  --border:#ddd3bf; --border-strong:#c9bca3; --border-control:#9d9078;
+
+  --text-1:#2e2a22; --text-2:#4f483c; --text-3:#6e6656; --text-4:#8b8170;
+  --text-inverse:#fffdf7;
+
+  --accent:#9a6a12; --accent-hover:#7c5409; --accent-ink:#7c5409;
+  --accent-solid:#8f6210; --accent-solid-hover:#744e0b;
+  --accent-soft:#f7ebcb; --accent-softer:#fcf6e7; --accent-line:#e6d6ac;
+  --accent-text:#fffdf4; --accent-rgb:154,106,18;
+  --brand-mark:linear-gradient(140deg,#f0d48c,#d9b25a);
+
+  --ring:rgba(154,106,18,.45); --selection:rgba(154,106,18,.18);
+  --desk:#e7decd; --page-line:rgba(60,45,20,.14);
+  --tool:#f8f2e5; --tool-hover:#efe7d5; --tool-active:#e5dac2;
+  --panel:#fbf7ee; --panel-2:#f2ebdc; --panel-3:#efe6d4;
+
+  --field-border:#9a6a12;
+  --field-fill:rgba(154,106,18,.10); --field-fill-hover:rgba(154,106,18,.18);
+  --field-fill-box:rgba(154,106,18,.14); --field-ring:rgba(154,106,18,.32);
+
+  --dropzone-fill:rgba(196,151,43,.12);
+  --highlight:rgba(232,196,106,.55); --highlight-ink:rgba(232,196,106,.36);
+}
+
+[data-theme="dark"],
+body.dark {
+  --bg-app:#15120e; --bg-sunken:#181510;
+  --surface:#28241d; --surface-raised:#302b23; --surface-sunken:#201c16;
+
+  --border:#443c2f; --border-strong:#5a503f; --border-control:#7c6f59;
+
+  --text-1:#f3ecdf; --text-2:#d8cebd; --text-3:#b0a58f; --text-4:#8e8370;
+  --text-inverse:#201c16;
+
+  --accent:#e7c56d; --accent-hover:#f3d992; --accent-ink:#f3d992;
+  --accent-solid:#ddb65b; --accent-solid-hover:#eac770;
+  --accent-soft:rgba(221,182,91,.20); --accent-softer:rgba(221,182,91,.10);
+  --accent-line:rgba(231,197,109,.36);
+  --accent-text:#231d12; --accent-rgb:231,197,109;
+  --brand-mark:linear-gradient(140deg,#f0d48c,#d9b25a);
+
+  --ring:rgba(231,197,109,.55); --selection:rgba(231,197,109,.24);
+  --desk:#120f0b; --page-line:rgba(0,0,0,.18);
+  --tool:#332e25; --tool-hover:#3d372c; --tool-active:#4a4235;
+  --panel:#28241d; --panel-2:#201c16; --panel-3:#332e25;
+
+  --field-border:#ddb65b;
+  --field-fill:rgba(221,182,91,.12); --field-fill-hover:rgba(221,182,91,.20);
+  --field-fill-box:rgba(221,182,91,.16); --field-ring:rgba(221,182,91,.35);
+
+  --dropzone-fill:rgba(231,197,109,.12);
+  --highlight:rgba(231,197,109,.45); --highlight-ink:rgba(231,197,109,.28);
+}
+
+/* Gold tile, warm ink letter — reads in both themes. */
+.brand-mark{color:#2a2113}

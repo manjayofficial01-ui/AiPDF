@@ -5,6 +5,7 @@ import { renderStampPreviews } from './stamps.js';
 import { normalizeRect, HANDLE_CURSORS } from './geometry.js';
 import { textEditDrawBox, textEditWashes } from './textblocks.js';
 import { storyFromEdit, layoutStory } from './story.js';
+import { activeLayerName, layerVisible } from './layers.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const XHTMLNS = 'http://www.w3.org/1999/xhtml';
@@ -390,6 +391,65 @@ export async function loadFileAnnotations() {
   // the stored bytes with pdf-lib and patch the model. Safe no-op when there
   // are no text boxes or no byte access.
   try { await applyFreeTextAlignment(d); } catch { /* alignment is best-effort */ }
+  try { await applyLayerAssignment(d); } catch { /* layer read-back is best-effort */ }
+}
+
+/**
+ * Recover a saved annotation's layer membership. The writer stores it as the
+ * private /AIPDFLayer key on the annotation dict; pdf.js does not surface
+ * custom keys, so this re-opens the stored bytes with pdf-lib and matches by
+ * subtype + rect, the same drift-proof pairing applyFreeTextAlignment uses.
+ * Same best-effort contract: safe to call always, returns immediately when
+ * there is nothing to recover.
+ */
+export async function applyLayerAssignment(doc) {
+  const targets = (doc.annots || []).filter((a) => a && !a.layer && a.fromFile);
+  if (!targets.length || !doc.bytes) return 0;
+  let PL;
+  try { PL = await import('/v/pdf-lib.js'); } catch { return 0; }
+  let pdf;
+  try { pdf = await PL.PDFDocument.load(doc.bytes, { updateMetadata: false }); } catch { return 0; }
+  const byPage = new Map();
+  for (const a of targets) {
+    if (!byPage.has(a.page)) byPage.set(a.page, []);
+    byPage.get(a.page).push(a);
+  }
+  let patched = 0;
+  for (const [pi, list] of byPage) {
+    let page;
+    try { page = pdf.getPage(pi); } catch { continue; }
+    if (!page) continue;
+    let annots;
+    try { annots = page.node.Annots(); } catch { continue; }
+    if (!annots) continue;
+    const dicts = [];
+    for (let k = 0; k < annots.size(); k++) {
+      try { const dict = annots.lookup(k, PL.PDFDict); if (dict) dicts.push(dict); } catch { /* skip */ }
+    }
+    for (const a of list) {
+      const sub = ANNOT_TYPES[a.type];
+      if (!sub) continue;
+      const r = a.rect || [];
+      for (const dict of dicts) {
+        try {
+          if (dict.get(PL.PDFName.of('Subtype'))?.toString() !== '/' + sub) continue;
+          const rr = dict.get(PL.PDFName.of('Rect'));
+          if (!rr || !rr.asArray) continue;
+          const vals = [];
+          for (let j = 0; j < Math.min(4, rr.size()); j++) vals.push(rr.get(j).asNumber());
+          if (vals.length !== 4 || !vals.every(Number.isFinite)) continue;
+          if (!vals.every((v, j) => Math.abs(v - (r[j] ?? v)) < 0.75)) continue;
+          const t = dict.get(PL.PDFName.of('AIPDFLayer'));
+          if (t) {
+            const s = String(t.asString?.() ?? t.decodeText?.() ?? t).replace(/^\uFEFF/, '');
+            if (s) { a.layer = s; patched++; }
+          }
+          break;
+        } catch { /* try the next dict */ }
+      }
+    }
+  }
+  return patched;
 }
 
 /* ── Geometry helpers ───────────────────────────────────────────────────── */
@@ -827,6 +887,10 @@ export function renderPageAnnotations(i) {
   const s = currentScale();
   const list = d.annots.filter((a) => a.page === i);
   for (const a of list) {
+    // Content on a hidden layer is not drawn — and therefore not pickable —
+    // exactly like the page content pdf.js already hides through the
+    // optional-content config.
+    if (a.layer && !layerVisible(d, a.layer)) continue;
     const g = svgEl('g', { class: 'ann', 'data-id': a.id });
     g.appendChild(annotNode(a, i, s));
     // Invisible fat stroke for easier hit-testing of thin geometry.
@@ -1043,6 +1107,9 @@ export function makeAnnot(type, page, rect, extra = {}) {
     author: settings.author || 'User',
     date: now.toISOString(),
     created: now.toISOString(),
+    // Land on the layer the user has active in the Layers panel (null =
+    // un-layered base content). extra.layer overrides for pastes and copies.
+    layer: activeLayerName() || null,
     borderWidth: type === 'rect' || type === 'ellipse' || type === 'line' || type === 'arrow' ? 1.5 : 0,
     fromFile: false,
     // Text Box / Callout: carry the Typewriter text properties so a new box

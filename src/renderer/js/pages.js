@@ -2,6 +2,7 @@ import { activeDoc, pushHistory, emit, pushStructUndo, canUndoStructure, canRedo
 import { loadPdfBytes, buildPages, relayout, applyLayoutToDom, scrollToPage, renderVisible } from './viewer.js';
 import { loadFileAnnotations, loadAttachments } from './annots.js';
 import { buildPdf, buildExtract, buildMerge } from './pdfwrite.js';
+import { loadDocLayers } from './layers.js';
 import { openNativeImagePage, applyNativeImageEdit, applyNativeAreaLayer, closeNativeImageSession } from './image-pdf-browser.mjs';
 import { toast, el } from './util.js';
 import { showModal, formRow } from './dialog.js';
@@ -47,6 +48,11 @@ export async function reloadDocFromBytes(doc, bytes, message = null) {
   await loadFileAnnotations();
   await loadAttachments();
   await loadFormFields(doc);
+  // Re-derive the layer model from the rebuilt bytes: file OCGs (with their
+  // saved visibility) plus any session layers not written yet. The cached
+  // optional-content config is refreshed here too, so hidden file content
+  // renders hidden from the first paint after the reload.
+  await loadDocLayers(doc);
   await buildPages(pdf);
   applyLayoutToDom();
   relayout(true);

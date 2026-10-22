@@ -881,6 +881,10 @@ export async function commitBlockEdit(pageIndex, block, nextText, options = {}) 
     : null;
 
   if (existing && !BLOCK_FIELDS.some((k) => JSON.stringify(edit[k]) !== JSON.stringify(existing[k]))) return false;
+  // New edits land on the active layer; a re-edit keeps the layer its edit
+  // already belongs to (the context panel can move it explicitly).
+  if (existing) edit.layer = existing.layer || edit.layer || null;
+  else edit.layer = doc.activeLayer || null;
   if (existing) Object.assign(existing, edit);
   else doc.textEdits.push(edit);
   pushHistory(options.label || 'direct edit');
@@ -1674,6 +1678,7 @@ export async function startTextEdit(pageIndex, span, opts = {}) {
     doc.textEdits.push({
       id: 'te' + Math.random().toString(36).slice(2, 8),
       page: pageIndex,
+      layer: doc.activeLayer || null,
       rect,
       baseline,
       size: fontSize,

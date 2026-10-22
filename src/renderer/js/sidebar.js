@@ -5,8 +5,9 @@ import {
 import { renderPageAnnotations, loadAttachments } from './annots.js';
 import { svgIcon } from './icons.js';
 import { $, el, escapeHtml, toast, formatBytes } from './util.js';
-import { confirmDialog, showModal } from './dialog.js';
+import { confirmDialog, showModal, promptDialog } from './dialog.js';
 import { goToMatch } from './search.js';
+import { addLayer, renameLayer, deleteLayer, setActiveLayer, setLayerVisible, uniqueLayerName, loadDocLayers, cfgGidByName } from './layers.js';
 import { deletePages, rotatePages, extractPages, insertBlankAt, insertFromPdfAt, reorderPages } from './pages.js';
 import { OCR_LANGS, OCR_ENGINES, ocrPage, isScanned, resolveOcrEngine, ocrEngineLabel } from './ocr.js';
 import { extractFontInfo, pickFontFile, registerCustomFont, setActiveNewTextFont, newTextFont, userFontRecords, removeUserFont, addSystemFont, listSystemFonts } from './fonts.js';
@@ -390,56 +391,106 @@ function renderSignatures() {
   }
 }
 
-/* ── Layers / optional content (Foxit panel) ────────────────────────────── */
+/* ── Layers / optional content (Foxit panel) ──────────────────────────────
+   Full layer management: add, show/hide, rename, delete, and an ACTIVE layer
+   that new annotations and Direct Editor text land on (layers.js owns the
+   model; pdfwrite.js writes it into the file as real OCGs on save). */
 
 async function renderLayers() {
   const doc = activeDoc();
+  if (!doc) return;
   const body = $('#sideBody');
   const tools = $('#sideTools');
-  body.appendChild(el('div', { class: 'empty-state', text: 'Loading layers…' }));
-  let cfg = doc.ocgConfig;
-  if (!cfg) {
-    try { cfg = await doc.pdf.getOptionalContentConfig(); } catch { cfg = null; }
-    doc.ocgConfig = cfg;
-  }
-  if (activeDoc() !== doc) return;
   body.innerHTML = '';
   tools.innerHTML = '';
 
-  // pdf.js returns the groups either as a Map or a plain object keyed by the
-  // group's ref string ("7R"); there is no .id on the group itself — the key
-  // IS the id setVisibility() wants.
-  const raw = cfg && typeof cfg.getGroups === 'function' ? cfg.getGroups() : null;
-  const entries = raw instanceof Map ? Array.from(raw.entries()) : Object.entries(raw || {});
-  if (!entries.length) {
+  // Build the model once per load: file OCGs + session layers, with the
+  // optional-content config cached for the viewer. loadDocLayers never
+  // emits, so this cannot re-enter.
+  if (!doc.layers) await loadDocLayers(doc);
+  if (activeDoc() !== doc) return;
+
+  const newBtn = el('button', { class: 'mini-btn', text: '+ New layer' });
+  newBtn.onclick = async () => {
+    const name = await promptDialog('Layer name', uniqueLayerName(doc, `Layer ${(doc.layers || []).length + 1}`), { title: 'New layer' });
+    if (name == null) return;
+    const nm = addLayer(doc, name);
+    // A fresh layer is active immediately, so what the user draws next is
+    // already on it — and it is visible by construction.
+    toast(`Layer "${nm}" created and active — new annotations and text go on it.`, 'ok', 6000);
+    renderLayers();
+  };
+  tools.appendChild(newBtn);
+
+  const layers = doc.layers || [];
+  if (!layers.length) {
     body.appendChild(el('div', {
       class: 'empty-state',
-      html: svgIcon('layers', 26) + '<div>This document has no layers.<br/>Layers (optional content) are created by the generating application.</div>',
+      html: svgIcon('layers', 26) + '<div>This document has no layers.<br/>Create one with “New layer”, then draw on it — every layer is written into the saved file and can be shown or hidden in any reader.</div>',
     }));
     return;
   }
 
+  // Toggling a layer that file content references has to reach pdf.js's
+  // config too, or the page stream ignores the change until a re-parse.
+  const syncCfg = (name, visible) => {
+    const cfg = doc.ocgConfig;
+    if (!cfg) return;
+    const gid = cfgGidByName(cfg, name);
+    if (gid != null && cfg.setVisibility) {
+      cfg.setVisibility(gid, visible);
+      doc.ocgConfigPromise = Promise.resolve(cfg);
+      rerenderAllPages();
+    }
+  };
+
   const draw = () => {
     body.innerHTML = '';
-    for (const [gid, g] of entries) {
+    // The base row: un-layered content. Clicking it just deactivates the
+    // active layer so new work lands outside any layer again.
+    const base = el('div', { class: 'layer-row' + (doc.activeLayer ? '' : ' active') }, [
+      el('span', { class: 'layer-name', text: 'Base content (no layer)' }),
+    ]);
+    base.onclick = () => { setActiveLayer(doc, null); draw(); };
+    body.appendChild(base);
+
+    for (const l of layers) {
       const cb = el('input', { type: 'checkbox' });
-      cb.checked = g.visible !== false;
+      cb.checked = l.visible !== false;
       cb.onchange = () => {
-        // pdf.js exposes `visible` as a getter; setVisibility() is the only
-        // supported way to change it. Assigning it threw and aborted the rest
-        // of this handler (the re-render never ran).
-        if (cfg.setVisibility) cfg.setVisibility(gid, cb.checked);
-        // Re-render every page with the modified optional-content config.
-        doc.ocgConfigPromise = Promise.resolve(cfg);
-        rerenderAllPages();
+        setLayerVisible(doc, l.name, cb.checked);
+        syncCfg(l.name, cb.checked);
+        draw();
       };
-      const row = el('label', { class: 'layer-row', style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '5px 8px', cursor: 'pointer' } }, [
-        cb,
-        el('span', { text: g.name || gid }),
-      ]);
-      body.appendChild(row);
+      const name = el('span', { class: 'layer-name', text: l.name, title: 'Click to make active — new annotations and text go on this layer' });
+      name.onclick = () => { setActiveLayer(doc, l.name); draw(); };
+      const ren = el('button', { class: 'layer-btn', title: 'Rename layer', html: svgIcon('editText', 13) });
+      ren.onclick = async (e) => {
+        e.stopPropagation();
+        const nm = await promptDialog('Layer name', l.name, { title: 'Rename layer' });
+        if (nm == null || nm === l.name) return;
+        const out = renameLayer(doc, l.name, nm);
+        if (!out) { toast('That name is already in use.', 'warn'); return; }
+        toast(`Layer renamed to "${out}" — content on it moved with it.`, 'ok', 5000);
+        renderLayers();
+      };
+      const del = el('button', { class: 'layer-btn', title: 'Delete layer', html: svgIcon('trash', 13) });
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        const ok = await confirmDialog(`Delete layer "${l.name}"?\n\nContent on it stays on the page and becomes un-layered (always visible).`);
+        if (!ok) return;
+        deleteLayer(doc, l.name);
+        syncCfg(l.name, true);   // any file content it held must render again
+        toast(`Layer "${l.name}" deleted — its content is now un-layered.`, 'ok', 5000);
+        renderLayers();
+      };
+      body.appendChild(el('div', { class: 'layer-row' + (doc.activeLayer === l.name ? ' active' : '') }, [cb, name, ren, del]));
     }
-    body.appendChild(el('div', { class: 'hint', style: { padding: '6px 8px' }, text: 'Visibility changes how pages render in AiPDF. Hidden layers reappear when you check them again.' }));
+
+    const active = doc.activeLayer || null;
+    body.appendChild(el('div', { class: 'hint', style: { padding: '6px 8px' }, text: active
+      ? `Active layer: ${active} — new annotations and Direct Editor text are placed on it. Click a layer's name to switch, a checkbox to show or hide it.`
+      : 'No active layer — new annotations and Direct Editor text land on the base content. Click a layer\'s name to make it active.' }));
   };
   draw();
 }

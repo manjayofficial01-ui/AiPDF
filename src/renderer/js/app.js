@@ -5,6 +5,7 @@ import {
   canUndoStructure, canRedoStructure,
 } from './store.js';
 import * as V from './viewer.js';
+import { loadDocLayers, layerVisible } from './layers.js';
 import { loadPdfBytes, buildPages, relayout, renderVisible, scrollToPage, renderPageToCanvas, applyLayoutToDom, currentScale, pageDims, pageEl, rerenderAllPages } from './viewer.js';
 import { loadFileAnnotations, renderPageAnnotations, renderAllAnnotations, ANNOT_TYPES, makeAnnot, normalizeRect, loadAttachments } from './annots.js';
 import { loadStoredUserFonts, customFontFamilies, isUserFont, removeUserFont, registerCustomFont, getFontkit, listSystemFonts, addSystemFont } from './fonts.js';
@@ -1607,6 +1608,9 @@ async function afterLoad(doc) {
   await loadFileAnnotations();
   await loadAttachments();
   await loadFormFields(doc);
+  // The Layers panel model: file OCGs parsed, session layers kept, the
+  // optional-content config cached so hidden file content renders hidden.
+  await loadDocLayers(doc);
   renderAllAnnotations();
   for (let i = 0; i < doc.numPages; i++) renderFormFields(i);
   renderSidebar();
@@ -4027,6 +4031,24 @@ function renderAnnotProps(a, host, panel) {
   op.onchange = () => pushHistory('opacity');
   g1.appendChild(el('div', { class: 'prop-row' }, [el('label', { text: (a.type === 'textbox' || a.type === 'callout') ? 'Border' : (hasFill ? 'Stroke' : 'Colour') }), el('div', { class: 'pr-c' }, [col])]));
   g1.appendChild(el('div', { class: 'prop-row' }, [el('label', { text: 'Opacity' }), el('div', { class: 'pr-c' }, [op])]));
+  // Move the annotation to one of the document's layers (Layers panel manages
+  // them). Choosing a hidden layer hides the annotation immediately, so the
+  // selection is dropped with it.
+  if ((activeDoc()?.layers || []).length) {
+    const d0 = activeDoc();
+    const lsel = el('select', { style: { width: '100%' } });
+    lsel.appendChild(el('option', { value: '', text: 'No layer (base)' }));
+    for (const l of d0.layers) lsel.appendChild(el('option', { value: l.name, text: l.visible === false ? `${l.name} (hidden)` : l.name }));
+    lsel.value = a.layer || '';
+    lsel.onchange = () => {
+      updateAnnot(a.id, { layer: lsel.value || null }, { silent: true });
+      renderAllAnnotations();
+      pushHistory('layer');
+      if (lsel.value && !layerVisible(d0, lsel.value)) state.selection = [];
+      renderContext();
+    };
+    g1.appendChild(el('div', { class: 'prop-row' }, [el('label', { text: 'Layer' }), el('div', { class: 'pr-c' }, [lsel])]));
+  }
   if (hasFill) {
     g1.appendChild(fillRow('Fill', a.fill || null, (v, hist) => {
       updateAnnot(a.id, { fill: v }, { silent: true });
@@ -5228,6 +5250,13 @@ function wireGlobal() {
     renderSidebarChrome();
     const cur = d.currentPage ?? 0;
     for (let i = Math.max(0, cur - 2); i <= Math.min(d.numPages - 1, cur + 2); i++) renderFormFields(i);
+  });
+  // Layer ops (add/rename/delete/activate/visibility) move annotations
+  // between visible and hidden and may change what the selection panel shows.
+  on('layers', () => {
+    renderAllAnnotations();
+    renderContext();
+    if (settings.sidebar === 'layers' && settings.sidebarOpen) renderSidebar();
   });
   on('pageRendered', (i) => { renderPageAnnotations(i); renderFormFields(i); });
   on('doc', () => updateStatus());

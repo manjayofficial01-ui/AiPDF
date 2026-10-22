@@ -2802,6 +2802,24 @@ body.tool-editText .textLayer span:hover {
   }
 }
 
+/* ── Layers panel ───────────────────────────────────────────────────────── */
+.layer-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+.layer-row:hover { background: var(--hover); }
+.layer-row.active { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.layer-row.active .layer-name { color: var(--accent); font-weight: 600; }
+.layer-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layer-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; flex: none;
+  border: 0; background: transparent; color: var(--text-2);
+  border-radius: var(--radius-xs); cursor: pointer;
+}
+.layer-btn:hover { background: var(--tool-hover); color: var(--text-1); }
+
 /* ── Edit Image tool ────────────────────────────────────────────────────── */
 /* The gesture is a marquee drag, so the cursor says so; clicking an image
    still works, and the selected object switches to `move` over its box. */

@@ -212,6 +212,129 @@ function makeFormXObject(doc, content, bbox, resources) {
   return doc.context.register(stream);
 }
 
+/* ── Optional-content layers ──────────────────────────────────────────────
+   doc.layers (see layers.js) is written into the saved file as real OCGs.
+   Content assigned to a layer is wrapped in /OC marked-content:
+     - annotation appearance streams get the wrapper inside their own form
+       XObject, with a /Properties entry mapping the name to the OCG ref;
+     - Direct Editor page content is wrapped inline, with the page's
+       /Resources /Properties gaining the same entry.
+   Empty doc.layers ⇒ every helper is a no-op, so documents without layers
+   save exactly as before. */
+
+/** The dict's /Name as a JS string, or '' — pdf-lib string types vary. */
+function ocgName(d) {
+  try {
+    const t = d.get(PDFName.of('Name'));
+    if (!t) return '';
+    const s = t.asString?.() ?? t.decodeText?.() ?? String(t);
+    return String(s).replace(/^\uFEFF/, '');
+  } catch { return ''; }
+}
+
+/** Map layer name → OCG ref for every OCG the target already carries: from
+ *  the catalog's OCProperties, plus the /Properties dicts of the pages
+ *  (copied pages reference copied OCG dicts the catalog does not list). */
+function collectOcgRefs(target, pages) {
+  const map = new Map();
+  const consider = (ref, d) => {
+    if (!d || !(d instanceof PDFDict)) return;
+    if (d.get(PDFName.of('Type'))?.toString() !== '/OCG') return;
+    const nm = ocgName(d);
+    if (nm && !map.has(nm)) map.set(nm, ref);
+  };
+  try {
+    const ocp = target.context.lookup(target.catalog.get(PDFName.of('OCProperties')));
+    const ocgs = ocp instanceof PDFDict ? target.context.lookup(ocp.get(PDFName.of('OCGs'))) : null;
+    if (ocgs instanceof PDFArray) for (const ref of ocgs.asArray()) consider(ref, target.context.lookup(ref));
+  } catch { /* no catalog layers */ }
+  for (const p of pages || []) {
+    try {
+      const res = target.context.lookup(p.node.get(PDFName.of('Resources')));
+      const props = res instanceof PDFDict ? target.context.lookup(res.get(PDFName.of('Properties'))) : null;
+      if (!(props instanceof PDFDict)) continue;
+      for (const [, v] of props.entries()) consider(v, target.context.lookup(v));
+    } catch { /* page without resources */ }
+  }
+  return map;
+}
+
+/** Resolve (creating where needed) an OCG ref for every model layer.
+ *  propByName fixes the property name each layer is referenced by — layer
+ *  names may contain characters that are not legal in a PDF name. */
+function ensureLayerRefs(target, doc, pages) {
+  const refByName = collectOcgRefs(target, pages);
+  const propByName = new Map();
+  (doc.layers || []).forEach((l, i) => {
+    propByName.set(l.name, 'L' + i);
+    if (!refByName.has(l.name)) {
+      refByName.set(l.name, target.context.register(obj(target, { Type: 'OCG', Name: PDFString.of(l.name) })));
+    }
+  });
+  return { refByName, propByName };
+}
+
+/** Write the catalog OCProperties from the model: one OCG per layer, ON/OFF
+ *  split by visibility. Replaces any inherited OCProperties — the model was
+ *  parsed from it at load, so this is faithful for flat layer lists. */
+function writeOCProperties(target, doc, L) {
+  const list = Array.isArray(doc.layers) ? doc.layers : [];
+  if (!list.length) return;
+  const all = [], on = [], off = [], order = [];
+  for (const l of list) {
+    const ref = L.refByName.get(l.name);
+    if (!ref) continue;
+    all.push(ref);
+    order.push(ref);
+    (l.visible !== false ? on : off).push(ref);
+  }
+  if (!all.length) return;
+  const d = obj(target, {});
+  d.set(PDFName.of('ON'), obj(target, on));
+  d.set(PDFName.of('OFF'), obj(target, off));
+  d.set(PDFName.of('Order'), obj(target, order));
+  d.set(PDFName.of('ListMode'), PDFName.of('AllPages'));
+  const ocp = obj(target, {});
+  ocp.set(PDFName.of('OCGs'), obj(target, all));
+  ocp.set(PDFName.of('D'), d);
+  target.catalog.set(PDFName.of('OCProperties'), target.context.register(ocp));
+}
+
+/** Wrap content in the layer's marked-content section and carry the OCG ref
+ *  in the resources' /Properties. Content on an unknown layer passes through
+ *  unwrapped (it renders un-layered rather than vanishing). */
+function ocWrap(name, L, content, resources) {
+  const ref = name && L && L.refByName.get(name);
+  if (!ref) return { content, resources };
+  const prop = L.propByName.get(name) || 'OC';
+  return {
+    content: '/OC /' + prop + ' BDC\n' + content + '\nEMC',
+    resources: { ...(resources || {}), Properties: { ...((resources && resources.Properties) || {}), [prop]: ref } },
+  };
+}
+
+/** Ensure a page's /Resources /Properties carries the layer's OCG ref, then
+ *  wrap the page-content ops in the marked-content section. Returns the ops
+ *  unchanged when there is nothing to wrap or the page has no own resources
+ *  (inherited resources would need a tree walk — such an edit then simply
+ *  draws un-layered, which is visible and safe rather than wrong). */
+function pageWrapOps(doc, page, name, ops, L) {
+  const ref = name && L && L.refByName.get(name);
+  if (!ref) return ops;
+  try {
+    const res = doc.context.lookup(page.node.get(PDFName.of('Resources')));
+    if (!(res instanceof PDFDict)) return ops;
+    const prop = L.propByName.get(name) || 'OC';
+    let props = doc.context.lookup(res.get(PDFName.of('Properties')));
+    if (!(props instanceof PDFDict)) {
+      props = obj(doc, {});
+      res.set(PDFName.of('Properties'), props);
+    }
+    props.set(PDFName.of(prop), ref);
+    return '/OC /' + prop + ' BDC\n' + ops + '\nEMC';
+  } catch { return ops; }
+}
+
 /* An annotation's own /CA only sets transparency. A blend mode has to live in
  * the appearance stream's graphics state, and every /GS name must be unique
  * per document, so the states are numbered as they are minted. */
@@ -476,7 +599,7 @@ function dataUrlBytes(dataUrl) {
 
 /* ── Annotation writer ──────────────────────────────────────────────────── */
 
-async function writeAnnotation(doc, page, a) {
+async function writeAnnotation(doc, page, a, L = null) {
   const subtype = ANNOT_TYPES[a.type] || 'Square';
   const r = a.rect.map((v) => n(v));
   const dict = obj(doc, {
@@ -513,6 +636,10 @@ async function writeAnnotation(doc, page, a) {
   }
 
   if (a.text) dict.set(PDFName.of('Contents'), PDFHexString.fromText(a.text));
+  // Layer membership travels on the annotation dict as a private key — pdf.js
+  // does not surface custom keys, so applyLayerAssignment() reads it back
+  // from the stored bytes on the next load (same trick as /Q alignment).
+  if (a.layer) dict.set(PDFName.of('AIPDFLayer'), PDFString.of(a.layer));
   if (a.opacity != null && a.opacity < 1) dict.set(PDFName.of('CA'), PDFNumber.of(n(a.opacity)));
 
   if (a.quads && a.quads.length && a.type !== 'highlighter') {
@@ -580,7 +707,8 @@ async function writeAnnotation(doc, page, a) {
 
   const ap = await appearanceFor(doc, page, a);
   if (ap) {
-    const ref = makeFormXObject(doc, ap.content, r, ap.resources);
+    const wrapped = ocWrap(a.layer, L, ap.content, ap.resources);
+    const ref = makeFormXObject(doc, wrapped.content, r, wrapped.resources);
     dict.set(PDFName.of('AP'), obj(doc, { N: ref }));
   }
   return doc.context.register(dict);
@@ -988,7 +1116,7 @@ async function applyTextEdit(doc, page, e, ctx = {}) {
     }
   }
   if (!ops.length) return;
-  appendPageOps(doc, page, ops.join(' '));
+  appendPageOps(doc, page, pageWrapOps(doc, page, e.layer, ops.join(' '), ctx.oc));
 }
 
 /* ── Stamps: watermark / header / footer / Bates ────────────────────────── */
@@ -1275,6 +1403,12 @@ export async function buildPdf(doc, opts = {}) {
 
   const pages = target.getPages();
 
+  /* Layer refs: one OCG per model layer (existing file OCGs are matched by
+     /Name; session-only layers are minted here). Everything layer-assigned
+     below wraps against this map, and the catalog OCProperties is written
+     from it just before the save. */
+  const L = ensureLayerRefs(target, doc, pages);
+
   /* Overlay (Stirling "Overlay PDFs"): stamp the pages of another document on
      top of — or underneath — this one. Positioning is in PDF user space, so
      existing annotations, stamps and text edits keep their coordinates and the
@@ -1310,7 +1444,7 @@ export async function buildPdf(doc, opts = {}) {
   for (const e of doc.textEdits || []) {
     const idx = indexMap ? indexMap.get(e.page) : e.page;
     if (idx == null || !pages[idx]) continue;
-    await applyTextEdit(target, pages[idx], e, { pageIndex: idx, pages, indexMap });
+    await applyTextEdit(target, pages[idx], e, { pageIndex: idx, pages, indexMap, oc: L });
   }
 
   /* Stamps (watermarks, header/footer, Bates) */
@@ -1402,7 +1536,7 @@ export async function buildPdf(doc, opts = {}) {
     const keep = widgetRefs(target, page);
     const refs = [];
     for (const a of list) {
-      try { refs.push(await writeAnnotation(target, page, a)); } catch (e) { console.warn('annot write failed', a.type, e); }
+      try { refs.push(await writeAnnotation(target, page, a, L)); } catch (e) { console.warn('annot write failed', a.type, e); }
     }
     // Preserve original annotations our model does NOT manage (links,
     // polygons, file attachments, …) so they survive a save. Annotations our
@@ -1469,6 +1603,10 @@ export async function buildPdf(doc, opts = {}) {
   if (opts.sanitize) {
     try { stripDocumentJavascript(target); } catch (e) { console.warn('js strip failed', e); }
   }
+
+  /* Optional-content layers — the model's layer list becomes the catalog's
+     OCProperties (written after all content so wrapped /OC references resolve). */
+  writeOCProperties(target, doc, L);
 
   /* Metadata — sanitize clears identifying fields (Stirling Sanitize). */
   if (opts.sanitize) {
@@ -1663,6 +1801,22 @@ export async function buildExtract(doc, indices) {
     const delta = doc.pageRotate?.[indices[k]] || 0;
     if (delta) p.setRotation(degrees(((src.getPage(indices[k]).getRotation().angle || 0) + delta + 360) % 360));
   });
+  // Layers survive an extract: the copied pages reference copied OCG dicts,
+  // but the fresh catalog has no OCProperties — without this the reader
+  // would not offer the layers any more. Extracted layers default to visible.
+  try {
+    const found = collectOcgRefs(out, pages);
+    if (found.size) {
+      const refs = [...found.values()];
+      const d = obj(out, {});
+      d.set(PDFName.of('ON'), obj(out, refs));
+      d.set(PDFName.of('Order'), obj(out, refs));
+      const ocp = obj(out, {});
+      ocp.set(PDFName.of('OCGs'), obj(out, refs));
+      ocp.set(PDFName.of('D'), d);
+      out.catalog.set(PDFName.of('OCProperties'), out.context.register(ocp));
+    }
+  } catch { /* layers are best-effort in extracts */ }
   return await out.save({ useObjectStreams: true });
 }
 

@@ -16,19 +16,26 @@
  */
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9416;
+// Own user-data dir: the checks assert DEFAULTS (Select at boot, an empty
+// Find box) and the user's live settings (remembered tool, open search panel
+// and its autofocus) would legitimately differ. Every other live gate
+// isolates the same way.
+const UD = path.join(ROOT, '.smoke', 'keytest-ud');
+fs.rmSync(UD, { recursive: true, force: true });
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
 // Normal launch with the fixture as a startup argument: the app opens the
 // document and stays alive. --functional-test would run its own assertions and
 // quit mid-test.
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
+const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 

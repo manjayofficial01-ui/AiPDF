@@ -4,4 +4,5 @@ import {createImagePdfAdapter} from './image-pdf.mjs';
 const adapter=createImagePdfAdapter(PDFLib);
 export const openNativeImagePage=adapter.open;
 export const applyNativeImageEdit=adapter.edit;
+export const applyNativeAreaLayer=adapter.placeAreaLayer;
 export const closeNativeImageSession=adapter.close;

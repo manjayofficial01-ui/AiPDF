@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {multiply,inverse,imageCorners,inspectImagePlacements,buildImageEdit,tokenizeImageContent} from '../src/renderer/js/image-objects.mjs';
+import {multiply,inverse,imageCorners,inspectImagePlacements,buildImageEdit,buildObjectEdit,tokenizeImageContent} from '../src/renderer/js/image-objects.mjs';
 const resources={Im0:{kind:'image',ref:'9 0 R',width:2,height:2},Form0:{kind:'form',ref:'10 0 R'}};
 let checks=0;
 function test(name,fn){fn();checks++;console.log('PASS '+name);}
@@ -36,4 +36,76 @@ test('refuse existing path clipping',()=>{const s=inspectImagePlacements('q 0 0 
 test('refuse pending path',()=>{const s=inspectImagePlacements('0 0 m /Im0 Do',resources);assert.throws(()=>buildImageEdit(s,s.images[0].id,{dx:10}));});
 test('refuse singular matrix',()=>{const s=inspectImagePlacements('0 0 0 0 0 0 cm /Im0 Do',resources);assert.throws(()=>buildImageEdit(s,s.images[0].id,{dx:1}));});
 test('matrix inverse roundtrip',()=>near(multiply([100,20,10,50,-30,40],inverse([100,20,10,50,-30,40])),[1,0,0,1,0,0]));
-console.log(JSON.stringify({checks,failed:0,scope:'Native image content-stream core, not Electron or PDF-library adapter'}));
+
+/* ── The object model: containers, inline images, paint order ─────────────
+ *  A page that LOOKS flat can still hold separately addressable objects.
+ *  These checks are the mechanism: read the content stream, descend into the
+ *  Form XObjects it draws, and report each object with page coordinates. */
+
+const formResources={Fm0:{kind:'form',ref:'10 0 R'}};
+const formPage='q 200 0 0 150 50 50 cm\n/Fm0 Do\nQ\n';
+const resolveForm=(name)=>name==='Fm0'
+  ?{source:'/Im0 Do',resources:{Im0:{kind:'image',ref:'9 0 R'}},matrix:[1,0,0,1,0,0],bbox:[0,0,1,1]}
+  :null;
+const nested=inspectImagePlacements(formPage,formResources,{resolveForm});
+test('a form is reported as a container object',()=>{assert.equal(nested.objects.length,2);assert.equal(nested.objects[0].kind,'form');assert.equal(nested.objects[0].name,'Fm0');});
+test('the form group is bounded by its BBox',()=>near(nested.objects[0].bounds,[50,50,250,200]));
+test('the image inside the form is found',()=>{assert.equal(nested.images.length,1);assert.equal(nested.images[0].kind,'image');assert.deepEqual(nested.images[0].container,['Fm0']);});
+test('a nested image is reported in PAGE coordinates',()=>near(nested.images[0].matrix,[200,0,0,150,50,50]));
+test('a nested image names the stream that holds it',()=>assert.equal(nested.images[0].streamKey,'form:Fm0'));
+test('the form is painted before its children',()=>assert.ok(nested.objects[0].order<nested.objects[1].order));
+test('a form that cannot be resolved stays unsupported',()=>{assert.equal(inspectImagePlacements(formPage,formResources).unsupported[0].reason,'nested-form');});
+test('a form that draws itself is refused',()=>{
+  const s=inspectImagePlacements(formPage,formResources,{resolveForm:(n)=>n==='Fm0'?{source:'/Fm0 Do',resources:formResources,matrix:[1,0,0,1,0,0]}:null});
+  assert.ok(s.unsupported.some(u=>u.reason==='recursive-form'));
+});
+test('a form inside a form is descended into',()=>{
+  const s=inspectImagePlacements('/Fm0 Do',{Fm0:{kind:'form',ref:'10 0 R'}},{resolveForm:(n)=>n==='Fm0'
+    ?{source:'q 2 0 0 2 0 0 cm /Fm1 Do Q',resources:{Fm1:{kind:'form',ref:'11 0 R'}},matrix:[1,0,0,1,0,0]}
+    :{source:'/Im0 Do',resources:{Im0:{kind:'image',ref:'9 0 R'}},matrix:[1,0,0,1,0,0]}});
+  assert.equal(s.images.length,1);
+  assert.deepEqual(s.images[0].container,['Fm0','Fm1']);
+  near(s.images[0].matrix,[2,0,0,2,0,0]);
+});
+
+const inlineSource='q 100 0 0 100 20 20 cm\nBI << /W 2 /H 2 /CS /G /BPC 8 >> ID \x01\x02\x03\x04 EI\nQ\n';
+const inlineScan=inspectImagePlacements(inlineSource,{});
+test('an inline image is an object, not a parse failure',()=>{assert.equal(inlineScan.images.length,1);assert.equal(inlineScan.images[0].kind,'inline');});
+test('an inline image keeps its placement',()=>near(inlineScan.images[0].matrix,[100,0,0,100,20,20]));
+test('an inline image does not hide the objects around it',()=>{
+  const s=inspectImagePlacements('q 10 0 0 10 0 0 cm /Im0 Do Q\n'+inlineSource,resources);
+  assert.equal(s.images.length,2);
+  assert.equal(s.images[0].kind,'image');
+  assert.equal(s.images[1].kind,'inline');
+});
+test('an inline image can be moved without touching its bytes',()=>{
+  const edited=buildImageEdit(inlineScan,inlineScan.images[0].id,{dx:20,dy:10});
+  assert.ok(edited.source.includes('BI << /W 2 /H 2 /CS /G /BPC 8 >> ID \x01\x02\x03\x04 EI'));
+  // The delta is in the image's own space: 20pt of a 100pt-wide image.
+  assert.match(edited.source,/q\n1 0 0 1 0\.2 0\.1 cm\n/);
+});
+test('an inline image refuses a replacement file',()=>assert.throws(()=>buildImageEdit(inlineScan,inlineScan.images[0].id,{replacementName:'/New'})));
+test('an inline image can be deleted',()=>assert.equal(buildImageEdit(inlineScan,inlineScan.images[0].id,{delete:true}).source.includes('BI'),false));
+test('later objects are painted over earlier ones',()=>{
+  const s=inspectImagePlacements('q 100 0 0 100 0 0 cm /Im0 Do Q\nq 50 0 0 50 10 10 cm /Im0 Do Q',resources);
+  assert.equal(s.objects.length,2);
+  assert.ok(s.objects[1].order>s.objects[0].order);
+});
+
+/* A group is changed in the PAGE stream, so a form other pages share is
+ * never modified. */
+test('a group is moved through the page stream',()=>{
+  const edited=buildObjectEdit(nested,nested.objects[0].id,{dx:20,dy:10});
+  assert.ok(edited.source.includes('/Fm0 Do'));
+  // 20pt and 10pt of a group that is 200x150 pt on the page.
+  assert.match(edited.source,/q\n1 0 0 1 0\.1 0\.0666666667 cm\n\/Fm0 Do\nQ/);
+  assert.equal(edited.streamKey,'page');
+});
+test('a group refuses a crop',()=>assert.throws(()=>buildObjectEdit(nested,nested.objects[0].id,{crop:[0,0,1,1]})));
+test('a nested image edit is expressed in its own stream',()=>{
+  const edited=buildImageEdit(nested,nested.images[0].id,{dx:20,dy:10});
+  assert.equal(edited.streamKey,'form:Fm0');
+  assert.match(edited.source,/1 0 0 1 0\.1 0\.0666666667 cm/);
+  assert.ok(!edited.source.includes('/Fm0 Do'),'the page stream is not touched by a nested edit');
+});
+console.log(JSON.stringify({checks,failed:0,scope:'Native object content-stream core, not Electron or PDF-library adapter'}));

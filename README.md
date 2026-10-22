@@ -21,7 +21,7 @@ Mapped from the capabilities that define the category leaders:
 | --- | --- | --- |
 | **View** | Fast pdf.js rendering, lazy page loading, text‑layer selection, thumbnails, bookmarks/outline, continuous & single‑page layouts, fit‑width/fit‑page, zoom, dark mode, **measurement rulers with draggable guides** — pull a guide straight out of a ruler (Photoshop‑style), it snaps to page edges/centre/other guides, moves by dragging and deletes by dragging back onto the ruler or double‑clicking (View ▸ Clear Guides). | All leaders |
 | **Comment** | Highlight, underline, strike‑through, squiggly, sticky notes, shapes (rect/ellipse/line/arrow), free‑ink, text boxes & callouts, stamps, signatures, images, measurement. **Real PDF annotations** are written with appearance streams so they render in any reader. | Acrobat / Foxit |
-| **Edit** | **Direct Editor** — Acrobat‑style in‑place text editing with a full Format panel (font, size, colour, bold/italic/underline, align incl. justify, line & character spacing, horizontal scaling). The font dropdown lists the **fonts installed on your machine** (grouped under *Local fonts*) alongside the standard families — picking one registers it so it embeds on save. **Tables are recognised** (ruled *and* borderless) so an edit inside a table is scoped to its **cell**, not the whole row — and the same cell scoping now works on **recognised scans**: OCR lines are cut at table-rule glyphs ("|" read by Tesseract) and word gutters, the grid is rebuilt from the recurring boundaries (header bands that sit at wrapped-line pitch are absorbed), and each cell becomes an independent block. With an AI key, recognition goes further: the vision model returns the table as **explicit per-cell entries** (the structure-aware idea from a proven PDF→Word flow), so cells arrive pre-separated. The Direct Editor panel also offers **Select area**: drag a rectangle on the page and only the text inside it becomes editable — on scans, recognition runs for that region first. When the text is detected the editor **asks for the text first**, prefilled, before anything is replaced. On save the original run is **removed from the file** and the replacement is written as ordinary page text (see [Object-owned editing](#object-owned-editing--remove-dont-cover)); the block can be **dragged anywhere** on the page, merged into a paragraph, or threaded across frames and pages. Plus redaction, headers/footers, watermarks, Bates numbering, page background. | Acrobat Pro / Nitro |
+| **Edit** | **Direct Editor** — Acrobat‑style in‑place text editing with a full Format panel (font, size, colour, bold/italic/underline, align incl. justify, line & character spacing, horizontal scaling). The font dropdown lists the **fonts installed on your machine** (grouped under *Local fonts*) alongside the standard families — picking one registers it so it embeds on save. **Tables are recognised** (ruled *and* borderless) so an edit inside a table is scoped to its **cell**, not the whole row — and the same cell scoping now works on **recognised scans**: OCR lines are cut at table-rule glyphs ("|" read by Tesseract) and word gutters, the grid is rebuilt from the recurring boundaries (header bands that sit at wrapped-line pitch are absorbed), and each cell becomes an independent block. With an AI key, recognition goes further: the vision model returns the table as **explicit per-cell entries** (the structure-aware idea from a proven PDF→Word flow), so cells arrive pre-separated. The Direct Editor panel also offers **Select area**: drag a rectangle on the page and only the text inside it becomes editable — on scans, recognition runs for that region first. When the text is detected the editor **asks for the text first**, prefilled, before anything is replaced. On save the original run is **removed from the file** and the replacement is written as ordinary page text (see [Object-owned editing](#object-owned-editing--remove-dont-cover)); the block can be **dragged anywhere** on the page, merged into a paragraph, or threaded across frames and pages. **Edit Object** - pick an object already drawn on the page and move, resize, rotate, flip, fade, crop, replace or delete it. Objects are read from the file rather than guessed from pixels, so a page that looks flat still yields its separate objects - including a logo drawn inside a Form XObject, which is copied before it is edited so a form shared with other pages is left alone. A click picks the object painted on top; Alt+click steps down to the one underneath. A drag that encloses an object selects it whole, while a drag **inside** an image is **Area Direct Edit**: only the picture in the box is selected and white margins are trimmed off. *New layer* lifts that selection into its own real PDF layer with the white background removed, leaving a white fill in its place; *Keep area* crops the placement instead. A box over blank paper selects nothing. Plus redaction, headers/footers, watermarks, Bates numbering, page background. | Acrobat Pro / Nitro |
 | **Organize** | Insert/delete/rotate/extract/reorder pages, merge documents, split, insert blank pages or pages from another PDF. | PDFelement / Nitro |
 | **Forms** | Read & fill existing AcroForm fields, create new text/checkbox/radio/dropdown/signature fields, export values to JSON/CSV. | Acrobat / PDF‑XChange |
 | **Protect** | **AES‑256 encryption** (user/owner passwords), granular permissions (print/copy/modify/annotate/fill), manual redaction marks + apply/sanitize, and remove security. | Acrobat / Nitro |
@@ -65,6 +65,25 @@ surprises and no bundler step required.
 The unified annotation model is stored in **PDF‑space coordinates**; an SVG
 overlay is rendered on screen with affine transforms and converted back to PDF
 space when the document is saved, so what you see is exactly what gets written.
+
+**Security model**
+- The renderer is sandboxed (Electron default), context-isolated, and the only
+  bridge to Node is `preload.js` → `window.api`.
+- The window can never navigate away from the app's own origin
+  (`will-navigate` guard), so the bridge cannot be carried to another page;
+  external links open in the OS browser only.
+- File access is **grant‑based**: `fs:read`/`fs:write` only accept paths that
+  came from a user gesture the main process saw — an open/save dialog, the
+  command line or "open with", a recent-list entry, a drag & drop, or the
+  app's own font/userData directories. A compromised renderer cannot silently
+  read or write arbitrary locations. (Headless test/debug sessions
+  `--remote-debugging-port`, `--*-test` bypass this: CDP already owns the
+  renderer there.)
+- The strict CSP allows only same-origin scripts (no inline script, no other
+  localhost ports); WASM compilation is allowed for pdf.js/Tesseract.
+- The AI / Read-Aloud proxy only fetches http(s) endpoints the user
+  configured, and reads every response through a size cap (5–32 MB) so a
+  hostile endpoint cannot exhaust memory.
 
 ---
 
@@ -475,6 +494,13 @@ npm run test:tools                   # node: the pure engines — compare.js dif
 npm run test:stirling                # node: stirling.js planners — compress/flatten/sanitize/N-up/booklet/… (28 checks)
 npm run test:overlay                 # node: two real PDFs through buildPdf → verified with pdf.js (9 checks)
 npm run test:doctools                # real app over CDP: all five tools end-to-end, incl. save → reopen (13 checks)
+
+# Edit Object tool (objects on the page, read from the file — not from pixels):
+node scripts/image-objects-test.mjs  # node: the core — containers, inline images, paint order (76 checks)
+node scripts/image-pdf-test.mjs      # node: the adapter — save/reopen, shared forms copied, not mutated (25 checks)
+npm run test:image                   # real app: select, move, resize, rotate, fade, crop, replace, delete (22 checks)
+npm run test:imagemarquee            # real app: a drag is a marquee, a press is a click (9 checks)
+npm run test:flatobject              # real app: a flat-looking page — paint order, a logo inside a form (12 checks)
 ```
 
 Each app mode prints a `BOOT_TEST` / `FUNC_TEST` / `EDIT_TEST` / `AI_TEST` JSON

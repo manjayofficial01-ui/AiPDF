@@ -72,7 +72,9 @@ t('a single word change is a small diff, not a page rewrite', () => {
   const edited = base.slice();
   edited[12] = 'sentence number thirteen';
   const d = diffPages(base.join('\n'), edited.join('\n'));
-  assert.equal(d.matched, 40);
+  // matched counts LCS pairs: the one changed line matches nothing, the
+  // other 39 lines are common — that is what keeps the diff small.
+  assert.equal(d.matched, 39);
   assert.deepEqual(d.added, ['sentence number thirteen']);
   assert.deepEqual(d.removed, ['sentence number 12']);
 });
@@ -98,7 +100,8 @@ t('comparisonReport lists +/- lines per changed page', () => {
   assert.match(r, /Page 2/);
   assert.match(r, /- gone/);
   assert.match(r, /\+ new/);
-  assert.match(r, /-1 words/);
+  // The report prints the typographic minus (U+2212) for the removed-word count.
+  assert.match(r, /\u22121 words/);
 });
 
 t('countWords counts words across lines', () => {
@@ -234,8 +237,12 @@ t('scalePages rejects nonsense', () => {
   assert.equal(JSON.stringify(m.pageOps.items), before);
 });
 
-t('scalePages survives an op list from a document with no ops', () => {
-  assert.equal(scalePages({ numPages: 2 }, 2), 0);
+t('scalePages builds the op list for a document with no ops', () => {
+  const m = { numPages: 2 };
+  // A fresh document has no pageOps yet; ensureOps() creates one from the
+  // page count, so every page is scaled — 0 would mean "nothing to do".
+  assert.equal(scalePages(m, 2), 2);
+  assert.deepEqual(m.pageOps.items.map((x) => x.t), ['scaled', 'scaled']);
 });
 
 t('removeBlankPages drops the flagged pages', () => {

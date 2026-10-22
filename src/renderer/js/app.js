@@ -1089,9 +1089,10 @@ const TOOLS = [
   ['formatPainter', 'Format painter', 'copy'], ['eyedropper', 'Colour picker', 'palette'],
   ['eraser', 'Eraser', 'eraser'], ['stamp', 'Stamp', 'stamp'],
   ['image', 'Image', 'image'], ['signature', 'Sign', 'signature'], ['redact', 'Redact', 'redact'],
-  // Select and edit an image already placed on the page (move, resize, rotate,
-  // flip, fade, replace, delete) through the native content-stream editor.
-  ['editImage', 'Edit image', 'crop'],
+  // Select and edit an object already placed on the page — a placed image, an
+  // inline image, or a whole Form XObject group (move, resize, rotate, flip,
+  // fade, crop, replace, delete) through the native content-stream editor.
+  ['editImage', 'Edit object', 'crop'],
   ['whiteout', 'Whiteout', 'whiteout'], ['measure', 'Measure', 'measure'],
   // Foxit's full drawing set
   ['roundRect', 'Rounded rect', 'roundRect'], ['polygon', 'Polygon', 'polygon'],
@@ -1243,7 +1244,7 @@ function ribbonGroupsForMode() {
     ];
     case 'Edit': return [
       { title: 'Direct Editor', items: toolButtons(['editText', 'editArea', 'whiteout']) },
-      { title: 'Images', items: toolButtons(['editImage']) },
+      { title: 'Objects', items: toolButtons(['editImage']) },
       { title: 'Links', items: [
         { icon: 'link', label: 'Add link', act: () => setTool('link') },
         { icon: 'trash', label: 'Remove links', act: () => onMenuAction('edit:removeLinks') },
@@ -1257,7 +1258,7 @@ function ribbonGroupsForMode() {
         { icon: 'scan', label: 'All scanned…', act: () => { setSidebar('ocr'); onMenuAction('ocr:all'); } },
         { icon: 'font', label: 'Fonts', act: () => setSidebar('fonts') },
       ] },
-      { title: 'Objects', items: [
+      { title: 'Insert', items: [
         { icon: 'image', label: 'Insert image', act: () => setTool('image') },
         { icon: 'signature', label: 'Insert signature', act: () => setTool('signature') },
       ] },
@@ -1587,8 +1588,14 @@ async function openDroppedFiles(fileList) {
   }
   for (const f of pdfs) {
     const p = window.api.pathForFile ? window.api.pathForFile(f) : '';
-    if (p) await openDocFromPath(p);
-    else await openDocFromBytes(new Uint8Array(await f.arrayBuffer()), f.name);
+    if (p) {
+      // A real OS drop is a user gesture the main process can trust: register
+      // the path so fs:read/fs:write accept it (opening now, saving later).
+      await window.api.grantDroppedFile?.(p).catch(() => {});
+      await openDocFromPath(p);
+    } else {
+      await openDocFromBytes(new Uint8Array(await f.arrayBuffer()), f.name);
+    }
   }
 }
 
@@ -5210,7 +5217,18 @@ function wireGlobal() {
   on('selection', () => { if (!state.ai.dockOpen) renderContext(); });
   // A Direct Editor session opening or closing changes which panel is correct.
   on('directEditor', () => { if (!state.ai.dockOpen) renderContext(); });
-  on('annots', () => { if (activeDoc()) renderAllAnnotations(); renderSidebarChrome(); });
+  // annots fires when the annotation OR the form-field list changes (placing a
+  // field emits it) — so the visible pages' form widgets re-render here too.
+  // Without this a freshly placed field stays invisible until the page
+  // happens to re-render.
+  on('annots', () => {
+    const d = activeDoc();
+    if (!d) return;
+    renderAllAnnotations();
+    renderSidebarChrome();
+    const cur = d.currentPage ?? 0;
+    for (let i = Math.max(0, cur - 2); i <= Math.min(d.numPages - 1, cur + 2); i++) renderFormFields(i);
+  });
   on('pageRendered', (i) => { renderPageAnnotations(i); renderFormFields(i); });
   on('doc', () => updateStatus());
   on('aiStatus', () => renderAIIndicator());

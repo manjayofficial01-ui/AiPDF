@@ -144,7 +144,30 @@ if (typeof clicked === 'string' && clicked.startsWith('{')) {
 }
 
 // Form widgets must still be reachable after the form-layer fix — the original
-// P1 bug was that they could not be clicked at all.
+// P1 bug was that they could not be clicked at all. fixture.pdf carries no
+// AcroForm fields, so first create one through the app's own placement flow:
+// start the "Add field" dialog, accept it, then drag a rect on the page.
+const placed = await ev(`(async function(){
+  try {
+    const F = await import('/js/forms.js');
+    F.startFieldPlacement('text');
+    await new Promise(r => setTimeout(r, 400));
+    const ok = document.querySelector('.modal button.primary');
+    if (!ok) return 'no-modal';
+    ok.click();
+    await new Promise(r => setTimeout(r, 400));
+    const page = document.querySelector('.page');
+    if (!page) return 'no-page';
+    const b = page.getBoundingClientRect();
+    const x = b.left + b.width * 0.3, y = b.top + b.height * 0.3;
+    const o = { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true, button: 0, buttons: 1 };
+    page.dispatchEvent(new PointerEvent('pointerdown', o));
+    window.dispatchEvent(new PointerEvent('pointermove', { ...o, clientX: x + 120, clientY: y + 30 }));
+    window.dispatchEvent(new PointerEvent('pointerup', { ...o, clientX: x + 120, clientY: y + 30, buttons: 0 }));
+    await new Promise(r => setTimeout(r, 700));
+    return document.querySelector('.formLayer input, .formLayer select, .formLayer textarea, .formLayer .field-widget') ? 'placed' : 'no-widget-after-place';
+  } catch (e) { return 'err: ' + (e && e.message || e); }
+})()`);
 const widget = await ev(`(function(){
   var w = document.querySelector('.formLayer input, .formLayer select, .formLayer textarea, .formLayer .field-widget');
   if (!w) return 'no-widget';
@@ -154,8 +177,8 @@ const widget = await ev(`(function(){
   var hit = document.elementFromPoint(x, y);
   return JSON.stringify({ hit: hit ? hit.tagName + '.' + (hit.getAttribute('class') || '') : 'nothing', contains: !!(hit && (hit === w || w.contains(hit) || hit.contains(w))) });
 })()`);
-let wok = false; let wdetail = widget;
-if (widget.startsWith('{')) { const o = JSON.parse(widget); wok = o.contains && !/formLayer/.test(o.hit); wdetail = `hit=${o.hit}`; }
+let wok = false; let wdetail = placed + ' | ' + widget;
+if (widget.startsWith('{')) { const o = JSON.parse(widget); wok = o.contains && !/formLayer/.test(o.hit); wdetail = placed + ' | hit=' + o.hit; }
 check('form widget is clickable (not blocked by its layer)', wok, wdetail);
 
 child.kill();

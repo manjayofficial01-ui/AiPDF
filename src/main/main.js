@@ -57,6 +57,44 @@ const isDev = process.argv.includes('--dev');
  *  opening the normal editor window. */
 const isTestMode = ['--boot-test', '--functional-test', '--edit-test', '--parity-test', '--ocr-test', '--ai-test', '--agent-test'].some((f) => process.argv.includes(f));
 
+/* ── Filesystem grant set ────────────────────────────────────────────────
+ *  The fs:read / fs:write bridge must not let a compromised renderer silently
+ *  read (say) ~/.ssh or write the Startup folder. Every legitimate path the
+ *  renderer ever holds comes from a user gesture the main process can see:
+ *  a dialog it showed, a command-line / "open with" path, a recent-list
+ *  entry, a real drag & drop, or the font directories this app manages. Each
+ *  of those registers a grant; anything else is refused.
+ *
+ *  Debug sessions (--remote-debugging-port or the headless --*-test flags)
+ *  skip enforcement: a CDP client already owns the renderer, and the test
+ *  gates stub the native dialogs in-page, so there is nothing left to
+ *  defend there and the gates would otherwise fail. */
+const FS_ENFORCE = !isTestMode
+  && !process.argv.some((a) => a === '--remote-debugging-port' || a.startsWith('--remote-debugging-port='));
+const grantedPaths = new Set();
+const grantedDirs = new Set();
+const normPath = (p) => {
+  const r = path.resolve(String(p || ''));
+  return process.platform === 'win32' ? r.toLowerCase() : r;
+};
+function grantPath(p) { if (p) grantedPaths.add(normPath(p)); }
+function grantDir(p) { if (p) grantedDirs.add(normPath(p)); }
+function pathGranted(p) {
+  if (!FS_ENFORCE) return true;
+  // Check both the lexical path and its realpath, so symlinked font
+  // directories match; a write target may not exist yet, so the realpath
+  // probe is best-effort.
+  const candidates = [normPath(p)];
+  try { candidates.push(normPath(fs.realpathSync.native(String(p)))); } catch { /* not on disk yet */ }
+  return candidates.some((n) => {
+    if (grantedPaths.has(n)) return true;
+    for (const d of grantedDirs) {
+      if (n === d || n.startsWith(d + path.sep.toLowerCase())) return true;
+    }
+    return false;
+  });
+}
+
 /** Test modes also write their result to .smoke/<name>.json — GUI-subsystem
  *  apps on Windows detach from the console, so stdout alone is unreliable. */
 function reportTest(name, payload) {
@@ -131,7 +169,10 @@ function createWindow(url, show = true) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // Electron 33 defaults to a sandboxed renderer and the preload only uses
+      // contextBridge/ipcRenderer/webUtils (all sandbox-safe), so the flag is
+      // simply omitted — a sandboxed preload shrinks the blast radius of any
+      // renderer or preload compromise.
       spellcheck: false,
       backgroundThrottling: false,
     },
@@ -190,6 +231,17 @@ function createWindow(url, show = true) {
     return { action: 'deny' };
   });
 
+  // Never let the window (or a crafted PDF link) navigate the app origin
+  // elsewhere: the preload bridge would re-execute on whatever origin it
+  // landed on. Compare origins, not prefixes — a prefix check on
+  // http://127.0.0.1:1234 would admit http://127.0.0.1:12345.
+  const appOrigin = new URL(url).origin;
+  win.webContents.on('will-navigate', (e, u) => {
+    let origin = '';
+    try { origin = new URL(u).origin; } catch { /* unparseable — refuse */ }
+    if (origin !== appOrigin) e.preventDefault();
+  });
+
   return win;
 }
 
@@ -199,7 +251,7 @@ function resolveStartupPath(argv) {
   for (const c of candidates) {
     if (!c || c.startsWith('--') || c.startsWith('-')) continue;
     const abs = path.resolve(c);
-    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) return abs;
+    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) { grantPath(abs); return abs; }
   }
   return null;
 }
@@ -227,7 +279,6 @@ async function boot() {
       pendingOpenPath = p;
     }
   });
-
   // Software rendering by default. The GPU process on some hosts is unstable:
   // it can die outright (Chromium then aborts the app) or stall the first
   // paint so 'ready-to-show' never fires. pdf.js draws through canvas 2D
@@ -251,6 +302,17 @@ async function boot() {
 
   await app.whenReady();
   trace('app ready');
+
+  // Grant the directories the app itself manages: user fonts live under
+  // userData (saved + loaded by name), and the system font index reads faces
+  // from the machine font dirs. Recents are granted because opening from the
+  // recent list is exactly as user-initiated as opening through the dialog.
+  grantDir(app.getPath('userData'));
+  for (const d of defaultDirs(process.env, process.platform)) grantDir(d);
+  {
+    const s = loadSettings();
+    if (Array.isArray(s.recents)) for (const r of s.recents) if (r && typeof r.path === 'string') grantPath(r.path);
+  }
 
   // Honour the saved preference rather than defaulting to the OS theme and
   // letting the renderer flip it a moment later — that flip was visible.
@@ -535,6 +597,7 @@ ipcMain.handle('dialog:open', async (_e, opts = {}) => {
     defaultPath: opts.defaultPath,
     title: opts.title,
   });
+  if (!res.canceled) for (const p of res.filePaths) grantPath(p);
   return res.canceled ? null : res.filePaths;
 });
 
@@ -544,6 +607,7 @@ ipcMain.handle('dialog:save', async (_e, opts = {}) => {
     defaultPath: opts.defaultPath,
     filters: opts.filters || [{ name: 'PDF Document', extensions: ['pdf'] }],
   });
+  if (!res.canceled && res.filePath) grantPath(res.filePath);
   return res.canceled ? null : res.filePath;
 });
 
@@ -560,7 +624,13 @@ ipcMain.handle('dialog:message', async (_e, opts = {}) => {
   return res.response;
 });
 
+/* fs:read / fs:write honour the grant set above: a renderer may only touch
+ * paths that arrived from a user gesture (dialog, command line, recent list,
+ * drag & drop) or from the app's own font/userData directories. Debug and
+ * headless-test sessions skip enforcement (see FS_ENFORCE). */
+
 ipcMain.handle('fs:read', async (_e, filePath) => {
+  if (!pathGranted(filePath)) return { ok: false, error: 'This file has not been opened in AiPDF Editor.' };
   try {
     const buf = await fs.promises.readFile(filePath);
     return { ok: true, data: new Uint8Array(buf) };
@@ -570,6 +640,7 @@ ipcMain.handle('fs:read', async (_e, filePath) => {
 });
 
 ipcMain.handle('fs:write', async (_e, filePath, data) => {
+  if (!pathGranted(filePath)) return { ok: false, error: 'This location has not been chosen in AiPDF Editor.' };
   try {
     const buf = Buffer.from(data);
     await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
@@ -580,14 +651,26 @@ ipcMain.handle('fs:write', async (_e, filePath, data) => {
   }
 });
 
-ipcMain.handle('fs:exists', async (_e, filePath) => fs.existsSync(filePath));
+/**
+ * Register a drag & drop as a grant. The renderer cannot fabricate a drop
+ * carrying a real filesystem path — webUtils.getPathForFile only resolves
+ * for File objects the OS actually delivered — so this keeps every fs grant
+ * tied to a gesture the user made, while letting a dropped document be
+ * saved back to where it came from.
+ */
+ipcMain.handle('fs:grantDrop', (_e, filePath) => {
+  if (filePath && typeof filePath === 'string') grantPath(filePath);
+  return true;
+});
+
+/** Existence probe (the font tests use it); same grant rules as fs:read. */
+ipcMain.handle('fs:exists', (_e, filePath) => pathGranted(filePath) && fs.existsSync(filePath));
 
 /**
  * Delete one file from the user-fonts directory, and nothing else.
  *
- * The renderer already has an unrestricted fs:write, so a general fs:delete would
- * widen an existing hole for no benefit. Font removal only ever targets a bare
- * filename inside userData/fonts, so that is all this will accept.
+ * Font removal only ever targets a bare filename inside userData/fonts, so
+ * that is all this will accept.
  */
 ipcMain.handle('font:delete', async (_e, fileName) => {
   const safe = String(fileName || '');
@@ -616,31 +699,6 @@ ipcMain.handle('fonts:system', async (_e, refresh) => {
   const { faces, skippedCollections } = buildFontIndex(dirs);
   systemFontIndex = { faces, skippedCollections, dirs, unsupported: false };
   return systemFontIndex;
-});
-
-ipcMain.handle('fs:info', async (_e, filePath) => {
-  try {
-    const st = await fs.promises.stat(filePath);
-    return {
-      ok: true,
-      size: st.size,
-      mtime: st.mtimeMs,
-      name: path.basename(filePath),
-      dir: path.dirname(filePath),
-      ext: path.extname(filePath).toLowerCase(),
-    };
-  } catch {
-    return { ok: false };
-  }
-});
-
-ipcMain.handle('shell:show', (_e, p) => {
-  if (p) shell.showItemInFolder(p);
-});
-
-ipcMain.handle('shell:open', async (_e, p) => {
-  if (p) return shell.openPath(p);
-  return '';
 });
 
 ipcMain.handle('print', async (_e, opts = {}) => {
@@ -689,7 +747,8 @@ ipcMain.handle('win:setTheme', (_e, mode) => {
 });
 
 ipcMain.handle('win:zoom', (_e, factor) => {
-  if (win) win.webContents.setZoomFactor(factor);
+  const f = Number(factor);
+  if (win && Number.isFinite(f) && f > 0) win.webContents.setZoomFactor(f);
 });
 
 ipcMain.handle('store:get', (_e, key, fallback) => {
@@ -709,13 +768,59 @@ ipcMain.handle('store:set', (_e, key, value) => {
    The renderer talks to OpenAI-compatible endpoints through the main process.
    Running the HTTP call here (a) sidesteps renderer CORS — many self-hosted and
    gateway servers send no CORS headers — and (b) keeps custom headers / auth
-   handling in one place. Node's global fetch is available in Electron 33. */
+   handling in one place. Node's global fetch is available in Electron 33.
+
+   The proxy fetches renderer-supplied URLs by design (bring your own key), so
+   it is bounded instead of open: only http(s) targets, and responses are read
+   through a size cap so a hostile or misconfigured endpoint cannot OOM the
+   main process. */
+
+const MODEL_LIST_CAP = 5 * 1024 * 1024;   // /models JSON
+const CHAT_JSON_CAP = 32 * 1024 * 1024;   // non-stream chat JSON (may embed images)
+const CHAT_STREAM_CAP = 8 * 1024 * 1024;  // accumulated stream text
+const TTS_AUDIO_CAP = 32 * 1024 * 1024;   // audio bytes
+
+/** Accept only http(s) URLs — the renderer has no business asking the main
+ *  process to fetch file:, data:, ftp: or custom-scheme targets. */
+function proxyTarget(u) {
+  try {
+    const p = new URL(String(u || ''));
+    return p.protocol === 'https:' || p.protocol === 'http:' ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read a response body up to `cap` bytes; refuse larger ones. */
+async function cappedBody(res, cap) {
+  const declared = Number(res.headers.get('content-length') || 0);
+  if (declared > cap) throw new Error('Response exceeds the size limit');
+  const reader = res.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > cap) {
+      try { await reader.cancel(); } catch { /* already closed */ }
+      throw new Error('Response exceeds the size limit');
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks);
+}
 
 ipcMain.handle('ai:models', async (_e, opts = {}) => {
   try {
-    const res = await fetch(opts.url, { method: 'GET', headers: opts.headers || {} });
-    const text = await res.text();
-    if (!res.ok) return { ok: false, status: res.status, error: text.slice(0, 400) };
+    const target = proxyTarget(opts.url);
+    if (!target) return { ok: false, error: 'The models endpoint must be an http(s) URL.' };
+    const res = await fetch(target, { method: 'GET', headers: opts.headers || {} });
+    if (!res.ok) {
+      const text = (await res.text().catch(() => '')).slice(0, 400);
+      return { ok: false, status: res.status, error: text };
+    }
+    const text = (await cappedBody(res, MODEL_LIST_CAP)).toString('utf8');
     let json = {};
     try { json = JSON.parse(text); } catch { return { ok: false, status: res.status, error: 'Invalid JSON from the models endpoint.' }; }
     const raw = Array.isArray(json.data) ? json.data : Array.isArray(json.models) ? json.models : [];
@@ -737,7 +842,9 @@ ipcMain.handle('ai:models', async (_e, opts = {}) => {
 
 ipcMain.handle('ai:chat', async (_e, opts = {}) => {
   try {
-    const res = await fetch(opts.url, {
+    const target = proxyTarget(opts.url);
+    if (!target) return { ok: false, error: 'The chat endpoint must be an http(s) URL.' };
+    const res = await fetch(target, {
       method: 'POST',
       headers: opts.headers || {},
       body: JSON.stringify(opts.body || {}),
@@ -747,7 +854,7 @@ ipcMain.handle('ai:chat', async (_e, opts = {}) => {
       return { ok: false, status: res.status, error: t.slice(0, 500) };
     }
     if (!opts.stream) {
-      const j = await res.json();
+      const j = JSON.parse((await cappedBody(res, CHAT_JSON_CAP)).toString('utf8'));
       // `raw` hands the full response body back to the renderer — the Gemini
       // protocol is parsed there (candidates/parts), while the OpenAI shape is
       // already answered here.
@@ -785,6 +892,7 @@ ipcMain.handle('ai:chat', async (_e, opts = {}) => {
             || (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
           if (d) {
             out += d;
+            if (out.length > CHAT_STREAM_CAP) throw new Error('Streamed response exceeds the size limit');
             if (win && !win.isDestroyed()) win.webContents.send('ai:stream', { reqId: opts.reqId, delta: d, text: out });
           }
         } catch { /* partial frame */ }
@@ -803,7 +911,9 @@ ipcMain.handle('ai:chat', async (_e, opts = {}) => {
 // custom-header-honoured rules as the chat proxy.
 ipcMain.handle('tts:request', async (_e, opts = {}) => {
   try {
-    const res = await fetch(opts.url, {
+    const target = proxyTarget(opts.url);
+    if (!target) return { ok: false, error: 'The speech endpoint must be an http(s) URL.' };
+    const res = await fetch(target, {
       method: opts.method || (opts.body ? 'POST' : 'GET'),
       headers: opts.headers || {},
       body: opts.body != null ? JSON.stringify(opts.body) : undefined,
@@ -813,11 +923,10 @@ ipcMain.handle('tts:request', async (_e, opts = {}) => {
       return { ok: false, status: res.status, error: t.slice(0, 500) };
     }
     if (opts.expect === 'json') {
-      return { ok: true, json: await res.json() };
+      return { ok: true, json: JSON.parse((await cappedBody(res, CHAT_JSON_CAP)).toString('utf8')) };
     }
-    const buf = await res.arrayBuffer();
+    const bytes = new Uint8Array(await cappedBody(res, TTS_AUDIO_CAP));
     let b64 = '';
-    const bytes = new Uint8Array(buf);
     const CHUNK = 0x8000;
     for (let i = 0; i < bytes.length; i += CHUNK) {
       b64 += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + CHUNK, bytes.length)));

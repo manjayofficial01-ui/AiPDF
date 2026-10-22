@@ -2,7 +2,7 @@ import { activeDoc, pushHistory, emit, pushStructUndo, canUndoStructure, canRedo
 import { loadPdfBytes, buildPages, relayout, applyLayoutToDom, scrollToPage, renderVisible } from './viewer.js';
 import { loadFileAnnotations, loadAttachments } from './annots.js';
 import { buildPdf, buildExtract, buildMerge } from './pdfwrite.js';
-import { openNativeImagePage, applyNativeImageEdit, closeNativeImageSession } from './image-pdf-browser.mjs';
+import { openNativeImagePage, applyNativeImageEdit, applyNativeAreaLayer, closeNativeImageSession } from './image-pdf-browser.mjs';
 import { toast, el } from './util.js';
 import { showModal, formRow } from './dialog.js';
 import { loadFormFields, renderFormFields } from './forms.js';
@@ -34,6 +34,10 @@ export async function reloadDocFromBytes(doc, bytes, message = null) {
   // not carry stale crop state across a reload — otherwise structural undo
   // "remembers" a crop whose bytes are already gone.
   doc.crops = {};
+  // A structural save can add layers (Area Direct Edit does). The panel's
+  // cached optional-content config would otherwise hide the new group.
+  doc.ocgConfig = null;
+  doc.ocgConfigPromise = null;
   doc.pageSizes = new Array(pdf.numPages);
   for (let i = 0; i < pdf.numPages; i++) {
     const page = await pdf.getPage(i + 1);
@@ -69,49 +73,42 @@ async function commitStructure(doc, { toastMsg } = {}) {
   if (toastMsg) toast(toastMsg, 'ok');
 }
 
-/* ── Native image placements ────────────────────────────────────────────── */
+/* ── Native objects on a page ─────────────────────────────────────────────── */
 
-/** Resolve the same placement across revisions. IDs are session-scoped, so a
- *  fresh session after a commit must find the image by resource name first,
- *  then by nearest centre (the same image can be drawn more than once). */
-function pickImage(images, target) {
+/** Resolve the same object across revisions. IDs are session-scoped, so a
+ *  fresh session after a commit must find the object by kind and name
+ *  first, then by nearest centre (the same image can be drawn more than
+ *  once, and a group keeps its name). */
+function pickObject(objects, target) {
   const cx = (target.bounds[0] + target.bounds[2]) / 2;
   const cy = (target.bounds[1] + target.bounds[3]) / 2;
   let best = null, bestScore = Infinity;
-  for (const im of images) {
-    if (im.singular) continue;
-    const b = im.bounds;
+  for (const o of objects) {
+    if (o.singular) continue;
+    if (target.kind && o.kind !== target.kind) continue;
+    const b = o.bounds;
     const d = Math.hypot((b[0] + b[2]) / 2 - cx, (b[1] + b[3]) / 2 - cy);
-    const score = d + (im.name === target.name ? 0 : 10000);
-    if (score < bestScore) { best = im; bestScore = score; }
+    const score = d + (o.name === target.name ? 0 : 10000);
+    if (score < bestScore) { best = o; bestScore = score; }
   }
   return best;
 }
 
-function imageView(im) {
-  return {
-    name: im.name,
-    bounds: im.bounds.slice(),
-    corners: im.corners.map((p) => p.slice()),
-    matrix: im.matrix.slice(),
-    clipped: !!im.clipped,
-  };
-}
-
-/** Image placements on the exported bytes of one page, so hit-testing sees
- *  exactly what a save would contain (pending edits included). */
-export async function listNativeImages(pageIndex) {
+/** Every object drawn on the exported bytes of one page — placed images,
+ *  inline images and Form XObject groups — so hit-testing sees exactly what
+ *  a save would contain (pending edits included). */
+export async function listNativeObjects(pageIndex) {
   const doc = activeDoc();
   if (!doc) return [];
   const bytes = await buildPdf(doc, {});
   const session = await openNativeImagePage(bytes, pageIndex);
-  try { return session.images.filter((im) => !im.singular).map(imageView); }
+  try { return session.objects.filter((o) => !o.singular); }
   finally { closeNativeImageSession(session); }
 }
 
-/** Apply one edit to a placement and commit it through the same rebuild +
+/** Apply one edit to an object and commit it through the same rebuild +
  *  structural-undo path as every other document structure change. */
-export async function commitNativeImageEdit(pageIndex, target, change) {
+export async function commitNativeObjectEdit(pageIndex, target, change) {
   const doc = activeDoc();
   if (!doc) return { ok: false, error: 'No document open' };
   const before = doc.bytes;
@@ -121,20 +118,50 @@ export async function commitNativeImageEdit(pageIndex, target, change) {
   try { session = await openNativeImagePage(bytes, pageIndex); }
   catch (e) { return { ok: false, error: String(e?.message || e) }; }
   try {
-    const im = pickImage(session.images, target);
-    if (!im) return { ok: false, error: 'That image can no longer be edited on this page' };
-    const candidate = await applyNativeImageEdit(session, im.id, change);
+    const ob = pickObject(session.objects, target);
+    if (!ob) return { ok: false, error: 'That object can no longer be edited on this page' };
+    const candidate = await applyNativeImageEdit(session, ob.id, change);
     await reloadDocFromBytes(doc, candidate, null);
     pushStructUndo(before);
     let next = null;
     if (!change.delete) {
       const after = await openNativeImagePage(candidate, pageIndex);
       try {
-        const im2 = pickImage(after.images, { name: im.name, bounds: im.bounds });
-        if (im2) next = imageView(im2);
+        const ob2 = pickObject(after.objects, { kind: ob.kind, name: ob.name, bounds: ob.bounds });
+        if (ob2) next = ob2;
       } finally { closeNativeImageSession(after); }
     }
-    return { ok: true, image: next };
+    return { ok: true, object: next };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  } finally {
+    closeNativeImageSession(session);
+  }
+}
+
+/** Lift the selected area of a placed image into a real PDF layer. The
+ *  adapter extracts the pixels (as a PNG), registers an optional-content
+ *  group, and cuts a matching hole in the source placement so the layer can
+ *  actually be shown and hidden. Committed through the same rebuild + undo
+ *  path as every other object edit. */
+export async function commitNativeAreaLayer(pageIndex, target, { area, pngBytes, layerBase } = {}) {
+  const doc = activeDoc();
+  if (!doc) return { ok: false, error: 'No document open' };
+  const before = doc.bytes;
+  let bytes, session;
+  try { bytes = await buildPdf(doc, {}); }
+  catch (e) { return { ok: false, error: String(e?.message || e) }; }
+  try { session = await openNativeImagePage(bytes, pageIndex); }
+  catch (e) { return { ok: false, error: String(e?.message || e) }; }
+  try {
+    const result = await applyNativeAreaLayer(session, target.id, { area, pngBytes, layerBase });
+    await reloadDocFromBytes(doc, result.bytes, null);
+    pushStructUndo(before);
+    const after = await openNativeImagePage(result.bytes, pageIndex);
+    let next = null;
+    try { next = after.objects.find((o) => o.name === result.image.name && !o.clipped) || null; }
+    finally { closeNativeImageSession(after); }
+    return { ok: true, object: next, layer: result.layer, image: result.image };
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   } finally {

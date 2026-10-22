@@ -425,7 +425,9 @@ async function renderLayers() {
       const cb = el('input', { type: 'checkbox' });
       cb.checked = g.visible !== false;
       cb.onchange = () => {
-        g.visible = cb.checked;
+        // pdf.js exposes `visible` as a getter; setVisibility() is the only
+        // supported way to change it. Assigning it threw and aborted the rest
+        // of this handler (the re-render never ran).
         if (cfg.setVisibility) cfg.setVisibility(gid, cb.checked);
         // Re-render every page with the modified optional-content config.
         doc.ocgConfigPromise = Promise.resolve(cfg);

@@ -1,5 +1,11 @@
 # Native image editor — engine milestone 1
 
+> **Superseded in scope.** The core now models the page's whole object tree
+> (images, inline images and Form XObject containers) rather than only top-level
+> image placements. See [EDIT-OBJECT-TOOL.md](EDIT-OBJECT-TOOL.md) for the
+> current design, the research it follows and the verification. This file is
+> kept as the milestone-1 record.
+
 This is the first implementation milestone, not a completed SwifDoo-equivalent UI.
 
 ## Implemented core
@@ -11,6 +17,11 @@ It changes the selected Do invocation and preserves bytes outside that span. It 
 ## Fail-closed scope
 
 Inline images cause page parsing to stop with an unsupported error. Form XObjects are reported but not recursively edited. Transform/crop edits refuse existing path/text clipping, pending paths, singular transforms and image masks. Deleting a placement does not sanitize unreferenced image bytes. Image crop is clipping, not confidential-data removal. The core consumes decoded page content, not whole PDF bytes.
+
+> Both of those limits were lifted in the object-tool work: inline images are
+> now measured and parsed, and Form XObjects are descended into. The remaining
+> refusals (clipping, pending paths, singular transforms, image masks) still
+> apply, and an object that cannot be edited safely is refused with a reason.
 
 ## Validation
 

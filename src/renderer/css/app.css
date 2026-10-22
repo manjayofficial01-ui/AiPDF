@@ -2174,6 +2174,9 @@ label.cb:focus-within { outline: var(--ring-w) solid var(--ring); outline-offset
 /* ── Form field widgets painted over the page ──────────────────────────── */
 .field-widget {
   position: absolute; padding: 0; margin: 0;
+  /* .formLayer is pointer-transparent so page gestures pass through the
+     empty parts; each widget opts back in, or no click can ever reach it. */
+  pointer-events: auto;
   border: 1px solid var(--field-border);
   border-radius: var(--radius-xs);
   background: var(--field-fill);
@@ -2800,7 +2803,14 @@ body.tool-editText .textLayer span:hover {
 }
 
 /* ── Edit Image tool ────────────────────────────────────────────────────── */
-body.tool-editImage .page canvas.pdf { cursor: pointer; }
+/* The gesture is a marquee drag, so the cursor says so; clicking an image
+   still works, and the selected object switches to `move` over its box. */
+body.tool-editImage .page canvas.pdf { cursor: crosshair; }
+.img-marquee {
+  position: fixed; pointer-events: none; z-index: 95;
+  border: 1px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
 body.img-edit-busy, body.img-edit-busy * { cursor: progress !important; }
 
 .img-edit-box {
@@ -2837,6 +2847,15 @@ body.img-edit-busy, body.img-edit-busy * { cursor: progress !important; }
 .img-crop-armed { cursor: crosshair; }
 .img-crop-armed .img-handle { display: none; }
 .img-readonly { cursor: default; }
+/* Area Direct Edit: the box is the picture inside the marquee, with the white
+   margins trimmed off — it is a selection to act on, not a handle to drag. */
+.img-edit-area {
+  border-style: dashed;
+  border-width: 2px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+.img-area-note { color: var(--accent); font-weight: 600; }
+.img-toolbar button:disabled { opacity: .45; cursor: default; }
 .img-crop-rect {
   position: absolute; pointer-events: none; z-index: 7;
   border: 2px dashed var(--accent);

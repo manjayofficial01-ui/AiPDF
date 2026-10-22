@@ -7,6 +7,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -16,7 +17,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.smoke', 'image-fixture.pdf');
 const PORT = 9510;
-const UD = path.join(ROOT, '.smoke', 'img-tool-ud');
+// A per-run temp user-data dir. A fixed dir under .smoke/ grows past the
+// bulk-delete guard, and then this suite cannot even start a second time.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-imagetool-'));
 
 /* 1. Fixture: two placed copies of assets/icon.png on a 400x300 page. */
 {
@@ -28,7 +31,6 @@ const UD = path.join(ROOT, '.smoke', 'img-tool-ud');
   page.drawImage(img, { x: 240, y: 40, width: 100, height: 80 });
   fs.writeFileSync(FIXTURE, await doc.save());
 }
-fs.rmSync(UD, { recursive: true, force: true });
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
@@ -103,12 +105,38 @@ const before = await ev(`__it.bounds().then(JSON.stringify)`);
 console.log('IMAGES_BEFORE', before);
 check('fixture has two image placements', JSON.parse(before || '[]').length === 2, before);
 
-/* 2. Arm the tool and click the first image. */
-await ev(`(function(){ var b = document.querySelector('#ribbon button[aria-label="Edit image"]'); if (b) b.click(); return b ? 'clicked' : 'none'; })()`);
-await sleep(300);
-check('Edit image tool is in the ribbon', await ev(`(async () => (await import('/js/store.js')).state.tool === 'editImage' && !!document.querySelector('#ribbon button[aria-label="Edit image"]'))()`));
+/* The page re-lays out after boot (a toast appears, the panel reflows), so a
+ * screen position is only meaningful once the layout has settled. */
+const rectOf = () => ev(`(function(){ var cv=document.querySelector('.page[data-i="0"] canvas.pdf'); if(!cv) return ''; var r=cv.getBoundingClientRect(); return [r.left,r.top,r.width,r.height].join(','); })()`);
+async function settle() {
+  let last = null, same = 0;
+  for (let i = 0; i < 40; i++) {
+    const now = await rectOf();
+    same = (now && now === last) ? same + 1 : 0;
+    if (same >= 3) return true;
+    last = now;
+    await sleep(200);
+  }
+  return false;
+}
+/** Screen positions of PDF points, taken from one settled layout. */
+async function pointsAt(list) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    await settle();
+    const before = await rectOf();
+    const pts = JSON.parse(await ev(`Promise.all([${list.map(([x, y]) => `__it.point(0, ${x}, ${y})`).join(',')}]).then(a => JSON.stringify(a))`));
+    if ((await rectOf()) !== before) continue;
+    return pts;
+  }
+  return JSON.parse(await ev(`Promise.all([${list.map(([x, y]) => `__it.point(0, ${x}, ${y})`).join(',')}]).then(a => JSON.stringify(a))`));
+}
 
-const p1 = JSON.parse(await ev(`__it.point(0, 100, 225).then(JSON.stringify)`));
+/* 2. Arm the tool and click the first image. */
+await ev(`(function(){ var b = document.querySelector('#ribbon button[aria-label="Edit object"]'); if (b) b.click(); return b ? 'clicked' : 'none'; })()`);
+await sleep(300);
+check('Edit object tool is in the ribbon', await ev(`(async () => (await import('/js/store.js')).state.tool === 'editImage' && !!document.querySelector('#ribbon button[aria-label="Edit object"]'))()`));
+
+const [p1] = await pointsAt([[100, 225]]);
 await mouse('mousePressed', p1.x, p1.y);
 await sleep(40);
 await mouse('mouseReleased', p1.x, p1.y);
@@ -183,7 +211,7 @@ check('delete removes one placement', afterDelete.length === 1, `${afterDelete.l
 check('selection cleared after delete', !(await ev(`!!document.querySelector('.img-edit-box')`)));
 
 /* 8. Crop the second image down to its left half. */
-const p2 = JSON.parse(await ev(`__it.point(0, 290, 80).then(JSON.stringify)`));
+const [p2] = await pointsAt([[290, 80]]);
 await mouse('mousePressed', p2.x, p2.y);
 await sleep(40);
 await mouse('mouseReleased', p2.x, p2.y);
@@ -191,8 +219,7 @@ for (let i = 0; i < 30; i++) { await sleep(250); if (await ev(`!!document.queryS
 const cropBtn = await ev(`(function(){ var b = [...document.querySelectorAll('.img-toolbar button')].find(function(x){ return /^Crop$/.test(x.textContent); }); if (b) b.click(); return b ? 'ok' : 'none'; })()`);
 check('crop button is available', cropBtn === 'ok', String(cropBtn));
 await sleep(300);
-const ca = JSON.parse(await ev(`__it.point(0, 240, 40).then(JSON.stringify)`));
-const cbpt = JSON.parse(await ev(`__it.point(0, 290, 120).then(JSON.stringify)`));
+const [ca, cbpt] = await pointsAt([[240, 40], [290, 120]]);
 await mouse('mousePressed', ca.x, ca.y);
 await sleep(50);
 for (let s = 1; s <= 5; s++) { await mouse('mouseMoved', ca.x + ((cbpt.x - ca.x) * s) / 5, ca.y + ((cbpt.y - ca.y) * s) / 5); await sleep(40); }
@@ -212,7 +239,7 @@ check('cropped selection covers the kept half', !!cropBox && Math.abs(cropBox.w 
 /* 9. A cropped placement offers delete only — the adapter refuses further
  *    native edits once the Do invocation carries a clip. */
 await sleep(400);
-const p3 = JSON.parse(await ev(`__it.point(0, 245, 80).then(JSON.stringify)`));
+const [p3] = await pointsAt([[245, 80]]);
 await mouse('mousePressed', p3.x, p3.y);
 await sleep(40);
 await mouse('mouseReleased', p3.x, p3.y);

@@ -83,4 +83,98 @@ await test('copy input bytes before asynchronous load',async()=>{
   const input=Uint8Array.from(original),pending=adapter.open(input,0);input.fill(0);assert.equal((await pending).images.length,2);
 });
 await test('close invalidates session',async()=>{const s=await adapter.open(original,0);assert.equal(adapter.close(s),true);await assert.rejects(()=>adapter.edit(s,s.images[0].id,{dx:1}));});
+
+/* ── Objects a page really holds ───────────────────────────────────────────
+ *  A Form XObject is a container, not a picture. Its children are separate
+ *  objects, reported in page coordinates, and editing one must not change
+ *  the shared definition other pages use. */
+
+/** Two pages that draw the SAME form, which holds one image. */
+async function formFixture(){
+  const doc=await PL.PDFDocument.create(),image=await doc.embedPng(red);await image.embed();
+  const formDict=doc.context.obj({
+    Type:'XObject',Subtype:'Form',BBox:[0,0,1,1],
+    Resources:doc.context.obj({XObject:doc.context.obj({Im0:image.ref})}),
+  });
+  formDict.set(PL.PDFName.of('Contents'),doc.context.register(doc.context.flateStream(encode('q 1 0 0 1 0 0 cm\n/Im0 Do\nQ\n'))));
+  const formRef=doc.context.register(formDict);
+  const resources=doc.context.obj({XObject:doc.context.obj({Fm0:formRef})});
+  for(let i=0;i<2;i++){
+    const page=doc.addPage([400,300]);
+    page.node.set(PL.PDFName.of('Resources'),resources);
+    page.node.set(PL.PDFName.of('Contents'),doc.context.register(doc.context.flateStream(encode('q 200 0 0 150 50 50 cm\n/Fm0 Do\nQ\n'))));
+  }
+  return doc.save({useObjectStreams:false});
+}
+const formBytes=await formFixture();
+await test('a form is a container of objects',async()=>{
+  const s=await adapter.open(formBytes,0);
+  assert.equal(s.objects.length,2);
+  assert.equal(s.objects[0].kind,'form');
+  assert.equal(s.objects[1].kind,'image');
+  assert.deepEqual(s.objects[1].container,['Fm0']);
+});
+await test('an object inside a form is reported in page coordinates',async()=>{
+  const s=await adapter.open(formBytes,0);
+  assert.deepEqual(s.objects[1].bounds.map(Math.round),[50,50,250,200]);
+  assert.deepEqual(s.objects[0].bounds.map(Math.round),[50,50,250,200]);
+});
+await test('editing an object inside a shared form leaves the other page alone',async()=>{
+  const s=await adapter.open(formBytes,0);
+  const nested=s.objects.find(o=>o.kind==='image');
+  const saved=await adapter.edit(s,nested.id,{dx:25,dy:10});
+  const page0=await adapter.open(saved,0),page1=await adapter.open(saved,1);
+  assert.deepEqual(page0.objects.find(o=>o.kind==='image').bounds.map(Math.round),[75,60,275,210]);
+  assert.deepEqual(page1.objects.find(o=>o.kind==='image').bounds.map(Math.round),[50,50,250,200]);
+});
+await test('editing an object inside a shared form copies the form',async()=>{
+  const s=await adapter.open(formBytes,0);
+  const nested=s.objects.find(o=>o.kind==='image');
+  const saved=await adapter.edit(s,nested.id,{dx:25,dy:10});
+  const reopened=await PL.PDFDocument.load(saved,{updateMetadata:false,preserveXFA:true});
+  const xobjects=reopened.getPage(0).node.Resources().lookup(PL.PDFName.of('XObject'),PL.PDFDict);
+  const names=xobjects.keys().map(k=>k.decodeText());
+  assert.ok(names.includes('Fm0'),'the original form is still in the file');
+  assert.ok(names.length>1,'the page draws a copy as well');
+  const original=reopened.context.lookup(xobjects.get(PL.PDFName.of('Fm0')));
+  const contents=reopened.context.lookup(original.get(PL.PDFName.of('Contents')));
+  const text=Buffer.from(PL.decodePDFRawStream(contents).decode()).toString('latin1');
+  assert.equal(text,'q 1 0 0 1 0 0 cm\n/Im0 Do\nQ\n');   // the shared definition is untouched
+});
+await test('a group drawn on the page is moved through the page stream',async()=>{
+  const s=await adapter.open(formBytes,0);
+  const group=s.objects.find(o=>o.kind==='form');
+  const saved=await adapter.edit(s,group.id,{dx:25,dy:10});
+  const page0=await adapter.open(saved,0),page1=await adapter.open(saved,1);
+  assert.deepEqual(page0.objects.find(o=>o.kind==='image').bounds.map(Math.round),[75,60,275,210]);
+  assert.deepEqual(page1.objects.find(o=>o.kind==='image').bounds.map(Math.round),[50,50,250,200]);
+});
+
+/** A page whose picture is an inline image, not an XObject. */
+async function inlineFixture(){
+  const doc=await PL.PDFDocument.create();
+  const page=doc.addPage([400,300]);
+  const raw=Buffer.from([1,2,3,4]).toString('binary');
+  const content='q 100 0 0 100 20 20 cm\nBI << /W 2 /H 2 /CS /G /BPC 8 >> ID '+raw+' EI\nQ\n';
+  page.node.set(PL.PDFName.of('Contents'),doc.context.register(doc.context.flateStream(encode(content))));
+  return doc.save({useObjectStreams:false});
+}
+const inlineBytes=await inlineFixture();
+await test('an inline image is an object',async()=>{
+  const s=await adapter.open(inlineBytes,0);
+  assert.equal(s.objects.length,1);
+  assert.equal(s.objects[0].kind,'inline');
+  assert.deepEqual(s.objects[0].bounds.map(Math.round),[20,20,120,120]);
+});
+await test('an inline image can be moved',async()=>{
+  const s=await adapter.open(inlineBytes,0);
+  const saved=await adapter.edit(s,s.objects[0].id,{dx:30,dy:15});
+  const after=await adapter.open(saved,0);
+  assert.deepEqual(after.objects[0].bounds.map(Math.round),[50,35,150,135]);
+});
+await test('a page with an inline image still reports the objects around it',async()=>{
+  const s=await adapter.open(inlineBytes,0);
+  assert.equal(s.objects.length,1);
+  assert.equal(s.unsupported.length,0);
+});
 console.log(JSON.stringify({checks,failed:0,build:process.env.AIPDF_TEST_BROWSER_BUNDLE==='1'?'browser-esm':'node-commonjs',scope:'PDF-library save/reopen; no Electron UI or visual rendering'}));

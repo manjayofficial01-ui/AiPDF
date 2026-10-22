@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' http://127.0.0.1:*; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:*; worker-src 'self' blob: http://127.0.0.1:*; connect-src 'self' http://127.0.0.1:* https: http: data: blob:; font-src 'self' data:;" />
+<!-- CSP: everything the app loads is same-origin ('self' = the local server),
+     so no wildcard localhost source and no inline scripts are needed. Tesseract
+     and pdf.js compile WASM ('wasm-unsafe-eval'); OCR language packs and AI
+     endpoints the user configures come over https: (chat/TTS run through the
+     main-process proxy, not from here). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' https: data: blob:; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>AiPDF Editor</title>
 <link rel="stylesheet" href="/css/app.css" />
 <link rel="stylesheet" href="/css/theme-professional.css" />

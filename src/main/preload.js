@@ -15,13 +15,11 @@ contextBridge.exposeInMainWorld('api', {
 
   readFile: (filePath) => ipcRenderer.invoke('fs:read', filePath),
   writeFile: (filePath, data) => ipcRenderer.invoke('fs:write', filePath, data),
+  /** Mark a drag & dropped file as openable/saveable (see fs:grantDrop). */
+  grantDroppedFile: (filePath) => ipcRenderer.invoke('fs:grantDrop', filePath),
   fileExists: (filePath) => ipcRenderer.invoke('fs:exists', filePath),
-  fileInfo: (filePath) => ipcRenderer.invoke('fs:info', filePath),
   deleteFontFile: (fileName) => ipcRenderer.invoke('font:delete', fileName),
   listSystemFonts: (refresh) => ipcRenderer.invoke('fonts:system', refresh),
-
-  showInFolder: (filePath) => ipcRenderer.invoke('shell:show', filePath),
-  openPath: (filePath) => ipcRenderer.invoke('shell:open', filePath),
 
   print: (opts) => ipcRenderer.invoke('print', opts),
   setTitle: (title) => ipcRenderer.invoke('win:setTitle', title),

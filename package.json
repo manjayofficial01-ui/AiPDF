@@ -1,7 +1,7 @@
 {
   "name": "aipdf-editor",
   "productName": "AiPDF Editor",
-  "version": "2.17.0",
+  "version": "2.19.0",
   "description": "AiPDF Editor — a modern Electron-based PDF viewer & editor with AI assistance, contract intelligence, smart redaction, multi-provider read-aloud and an agentic AI bot",
   "main": "src/main/main.js",
   "author": "manjayofficial01-ui",
@@ -31,6 +31,9 @@
     "test:fonts": "node scripts/fontindex-test.mjs && node scripts/system-font-test.mjs",
     "test:tools": "node scripts/tools-test.mjs",
     "test:objects": "node scripts/object-edit-test.mjs",
+    "test:imagemarquee": "node scripts/image-marquee-test.mjs",
+    "test:image": "node scripts/image-tool-test.mjs",
+    "test:flatobject": "node scripts/flat-object-test.mjs",
     "test:overset": "node scripts/overset-badge-test.mjs",
     "test:direct": "node scripts/direct-edit-test.mjs",
     "test:markup": "node scripts/markup-test.mjs",

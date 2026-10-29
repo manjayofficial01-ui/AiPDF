@@ -173,6 +173,10 @@ export async function contextFor(scope, question = '') {
 /** Normalised base URL (no trailing slash). */
 function aiBase(cfg = settings.ai) {
   const a = cfg || {};
+  // Gemini's REST root needs normalising (adds /v1beta, redirects a pasted
+  // web-app URL). Without this, GET /models went to the wrong address and the
+  // fetched catalogue came back empty or partial.
+  if (isGemini(a)) return geminiBase(a);
   return (a.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
 }
 
@@ -290,15 +294,18 @@ async function callAI(messages, onDelta) {
  *  strip the prefix and keep only generateContent-capable entries. */
 export function parseModelList(json) {
   const raw = Array.isArray(json?.data) ? json.data : Array.isArray(json?.models) ? json.models : [];
-  return raw
+  const ids = raw
     .map((m) => {
       if (typeof m === 'string') return m;
+      // Google lists embedding/tts models on the same endpoint; keep only the
+      // ones that can answer a generateContent call.
       if (m && Array.isArray(m.supportedGenerationMethods) && !m.supportedGenerationMethods.includes('generateContent')) return '';
       return (m && (m.id || m.name)) || '';
     })
     .filter(Boolean)
-    .map((s) => String(s).replace(/^models\//, ''))
-    .sort((a, b) => a.localeCompare(b));
+    .map((s) => String(s).replace(/^models\//, ''));
+  // Dedupe: a paged catalogue can repeat an entry across pages.
+  return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
 }
 
 /** Fetch the provider's model list from the OpenAI-compatible GET /models. */
@@ -309,16 +316,35 @@ export async function fetchModels(cfg = settings.ai) {
   if (window.api?.aiModels) {
     res = await window.api.aiModels({ url, headers: hdrs });
   } else {
+    // Browser fallback: page through nextPageToken by hand. The packaged app
+    // uses the main-process proxy, which paginates itself.
     try {
-      const r = await fetch(url, { method: 'GET', headers: hdrs });
-      const t = await r.text();
-      if (!r.ok) res = { ok: false, status: r.status, error: t.slice(0, 300) };
-      else res = { ok: true, models: parseModelList(JSON.parse(t)) };
+      const gem = isGemini(cfg);
+      const all = [];
+      let token = '';
+      for (let page = 0; page < 50; page++) {
+        const u = new URL(url);
+        if (gem) {
+          u.searchParams.set('pageSize', '1000');
+          if (token) u.searchParams.set('pageToken', token);
+        }
+        const r = await fetch(u.toString(), { method: 'GET', headers: hdrs });
+        const t = await r.text();
+        if (!r.ok) { res = { ok: false, status: r.status, error: t.slice(0, 300) }; break; }
+        const json = JSON.parse(t);
+        all.push(...parseModelList(json));
+        token = json.nextPageToken || json.next_page_token || '';
+        if (!token) { res = { ok: true, models: [...new Set(all)].sort((a, b) => a.localeCompare(b)) }; break; }
+      }
+      if (!res) res = { ok: true, models: [...new Set(all)].sort((a, b) => a.localeCompare(b)) };
     } catch (e) { res = { ok: false, error: String(e.message || e) }; }
   }
-  if (res && res.ok && Array.isArray(res.models) && cfg === settings.ai) {
-    settings.ai.availableModels = res.models;
-    saveSettings();
+  if (res && res.ok && Array.isArray(res.models)) {
+    // Persist on the caller's config too: the settings dialog works on a copy
+    // of settings.ai, so guarding on `cfg === settings.ai` silently dropped the
+    // fetched list when the dialog was confirmed.
+    cfg.availableModels = res.models;
+    if (cfg === settings.ai) saveSettings();
   }
   return res || { ok: false, error: 'No response' };
 }
@@ -334,10 +360,14 @@ async function testConnection(cfg) {
   const url = endpoint('chat/completions', cfg);
   const hdrs = headers(cfg);
   const body = { model: cfg.model || 'gpt-4o-mini', messages: [{ role: 'user', content: 'Reply with the single word: ok' }], stream: false, temperature: 0 };
-  if (window.api?.aiChat) return window.api.aiChat({ url, headers: hdrs, body, stream: false });
+  if (window.api?.aiChat) {
+    const r = await window.api.aiChat({ url, headers: hdrs, body, stream: false });
+    if (!r || !r.ok) return { ok: false, status: r?.status, error: describeHttpFailure(r?.status, r?.error, url) };
+    return r;
+  }
   try {
     const r = await fetch(url, { method: 'POST', headers: hdrs, body: JSON.stringify(body) });
-    if (!r.ok) return { ok: false, status: r.status, error: (await r.text().catch(() => '')).slice(0, 300) };
+    if (!r.ok) return { ok: false, status: r.status, error: describeHttpFailure(r.status, await r.text().catch(() => ''), url) };
     const j = await r.json();
     return { ok: true, text: j.choices?.[0]?.message?.content || '' };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
@@ -352,10 +382,19 @@ export function isGemini(cfg = settings.ai) {
   return a.provider === 'gemini' || /generativelanguage\.googleapis\.com/i.test(a.baseUrl || '');
 }
 
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+
 /** Normalised Gemini base: accepts "…/v1beta", "…/v1" or even a full pasted
- *  "…/v1beta/models/gemini-2.5-flash" URL and returns the API root. */
+ *  "…/v1beta/models/gemini-2.5-flash" URL and returns the API root.
+ *
+ *  A very common mistake is pasting the Gemini *web app* or AI Studio URL
+ *  (gemini.google.com, aistudio.google.com, …). Those are Cloudflare-fronted
+ *  websites, not the API: a request there returns an HTML page, which then
+ *  surfaces as "could not be converted: <!DOCTYPE html>". Redirect known web
+ *  hosts to the real API root so the request actually reaches Google. */
 export function geminiBase(cfg = settings.ai) {
-  let u = String((cfg && cfg.baseUrl) || 'https://generativelanguage.googleapis.com/v1beta').trim();
+  let u = String((cfg && cfg.baseUrl) || GEMINI_API_BASE).trim();
+  if (/(^|\/\/)(gemini|aistudio|makersuite|bard)\.google\.com/i.test(u)) return GEMINI_API_BASE;
   u = u.replace(/\/+$/, '').replace(/\/models.*$/, '');
   if (/generativelanguage\.googleapis\.com$/i.test(u.replace(/^https?:\/\//, '').replace(/\/.*$/, '')) || /generativelanguage\.googleapis\.com\/?$/i.test(u)) {
     if (!/\/v\d[a-z]*$/i.test(u)) u += '/v1beta';
@@ -454,19 +493,43 @@ export function geminiText(json) {
   return parts.filter((p) => typeof p.text === 'string').map((p) => p.text).join('');
 }
 
+/** True when a response body is an HTML page rather than the JSON we expect. */
+export function looksLikeHtml(s) {
+  const t = String(s || '').trim().slice(0, 600).toLowerCase();
+  if (!t) return false;
+  return t.startsWith('<!doctype') || t.startsWith('<html') || t.includes('<html')
+    || t.includes('<body') || t.includes('cf-error') || t.includes('cloudflare')
+    || t.includes('attention required') || t.includes('just a moment');
+}
+
+/** Turn an HTTP failure body into a message a person can act on, instead of
+ *  dumping a Cloudflare challenge page into the document. */
+export function describeHttpFailure(status, body, url) {
+  const raw = String(body || '').trim();
+  if (looksLikeHtml(raw)) {
+    let host = 'the endpoint';
+    try { host = new URL(url).host; } catch { /* keep default */ }
+    return `The AI endpoint (${host}) returned an HTML page instead of JSON${status ? ` (HTTP ${status})` : ''}. `
+      + 'This normally means the Base URL points at a website or a blocked proxy rather than the API, '
+      + 'or the API key was rejected. For Google Gemini use Base URL '
+      + 'https://generativelanguage.googleapis.com/v1beta with a model such as gemini-2.5-flash.';
+  }
+  return raw.slice(0, 240) || (status ? `AI request failed (HTTP ${status})` : 'AI request failed');
+}
+
 /** POST any provider body through the main-process proxy; returns raw JSON. */
 async function postJson(url, hdrs, body) {
   if (window.api?.aiChat) {
     const res = await window.api.aiChat({ url, headers: hdrs, body, stream: false, raw: true });
-    if (!res || !res.ok) throw new Error(res?.error ? res.error.slice(0, 300) : `AI request failed (${res?.status || '?'})`);
+    if (!res || !res.ok) throw new Error(describeHttpFailure(res?.status, res?.error, url));
     return res.json || {};
   }
   const res = await fetch(url, { method: 'POST', headers: hdrs, body: JSON.stringify(body) });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(`AI request failed (${res.status}): ${txt.slice(0, 240)}`);
-  }
-  return await res.json();
+  const txt = await res.text().catch(() => '');
+  // A 200 can still be an HTML challenge page — detect before JSON.parse so the
+  // user sees a diagnosis, not "Unexpected token '<'".
+  if (!res.ok || looksLikeHtml(txt)) throw new Error(describeHttpFailure(res.status, txt, url));
+  try { return JSON.parse(txt); } catch { throw new Error(describeHttpFailure(res.status, txt, url)); }
 }
 
 /**
@@ -512,15 +575,18 @@ export async function chatComplete(messages, { tools = null, temperature, maxTok
  * agent's view_page tool). Works over both protocols and reuses the full
  * provider stack — base URL, key, auth mode and custom headers all apply.
  */
-export async function visionRequest(prompt, dataUrl, cfg = settings.ai) {
+export async function visionRequest(prompt, dataUrl, cfg = settings.ai, opts = {}) {
   if (!aiReady()) throw new Error('AI is not configured — set up a provider first.');
   const comma = dataUrl.indexOf(',');
   const meta = dataUrl.slice(5, comma).split(';')[0] || 'image/png';
   const b64 = dataUrl.slice(comma + 1);
+  // Document conversion can legitimately fill a long page; allow callers (the
+  // PDF→Word flow) to raise the ceiling without touching every vision call.
+  const maxTokens = opts.maxTokens || 16384;
   if (isGemini(cfg)) {
     const body = {
       contents: [{ role: 'user', parts: [{ text: prompt }, { inline_data: { mime_type: meta, data: b64 } }] }],
-      generationConfig: { temperature: 0.1, maxOutputTokens: 16384 },
+      generationConfig: { temperature: 0.1, maxOutputTokens: maxTokens },
     };
     const json = await postJson(geminiEndpoint(cfg.model, cfg), headers(cfg), body);
     return geminiText(json).trim();
@@ -536,7 +602,7 @@ export async function visionRequest(prompt, dataUrl, cfg = settings.ai) {
     }],
     temperature: 0.1,
     stream: false,
-    max_tokens: 16384,
+    max_tokens: maxTokens,
   };
   const json = await postJson(endpoint('chat/completions', cfg), headers(cfg), body);
   return String(json?.choices?.[0]?.message?.content || '').trim();
@@ -1191,18 +1257,41 @@ export async function configureAI(firstTime = false) {
       const savedIdx = presets.findIndex((p) => p.provider === (a.provider || 'openai'));
       preset.value = String(savedIdx >= 0 ? savedIdx : presets.length - 1);
       const url = el('input', { type: 'text', value: a.baseUrl || '', placeholder: 'https://api.openai.com/v1' });
-      const model = el('input', { type: 'text', value: a.model || '', list: 'aiModelList', placeholder: 'gpt-4o-mini' });
-      const modelList = el('datalist', { id: 'aiModelList' });
-      (a.availableModels || []).forEach((m) => modelList.appendChild(el('option', { value: m })));
+      const model = el('input', { type: 'text', value: a.model || '', placeholder: 'gpt-4o-mini' });
       const fetchBtn = el('button', { class: 'mini-btn', text: 'Fetch models', title: 'GET /models from the provider' });
       const key = el('input', { type: 'password', value: a.apiKey || '', placeholder: 'sk-… (leave empty for local servers)' });
+      // Fetched models live in a real scrollable list box. A <datalist> dropdown
+      // cannot be scrolled through a long catalogue, so most models were hidden.
+      const modelBox = el('div', { class: 'model-pick' });
+      const modelNote = el('div', { class: 'hint', text: '' });
+      const highlightModel = () => {
+        for (const row of modelBox.children) row.classList.toggle('on', row.textContent === model.value);
+      };
+      const renderModelBox = (models) => {
+        modelBox.innerHTML = '';
+        if (!models || !models.length) {
+          modelBox.style.display = 'none';
+          modelNote.textContent = '';
+          return;
+        }
+        for (const m of models) {
+          const row = el('button', { class: 'model-row', type: 'button', text: m, title: m });
+          row.onclick = () => { model.value = m; sync(); highlightModel(); };
+          modelBox.appendChild(row);
+        }
+        modelBox.style.display = '';
+        modelNote.textContent = `${models.length} model${models.length === 1 ? '' : 's'} — scroll and click to choose.`;
+        highlightModel();
+      };
 
       b.appendChild(el('div', { class: 'hint', text: 'Connection' }));
       b.appendChild(formRow('Preset', preset).row);
       b.appendChild(formRow('Base URL', url).row);
       b.appendChild(formRow('Model', [model, fetchBtn]).row);
-      b.appendChild(modelList);
+      b.appendChild(modelNote);
+      b.appendChild(modelBox);
       b.appendChild(formRow('API key', key).row);
+      renderModelBox(a.availableModels || []);
 
       /* ── Authentication & headers ── */
       const authMode = el('select', {});
@@ -1274,7 +1363,7 @@ export async function configureAI(firstTime = false) {
         sync();
       };
       url.oninput = sync;
-      model.oninput = sync;
+      model.oninput = () => { sync(); highlightModel(); };
       key.oninput = sync;
       authName.oninput = sync;
       temp.oninput = sync;
@@ -1289,10 +1378,9 @@ export async function configureAI(firstTime = false) {
         status.textContent = 'Fetching models…';
         const res = await fetchModels(a);
         if (res.ok) {
-          modelList.innerHTML = '';
-          (res.models || []).forEach((m) => modelList.appendChild(el('option', { value: m })));
+          renderModelBox(res.models || []);
           status.textContent = `Found ${res.models.length} model${res.models.length === 1 ? '' : 's'}.`;
-          if (!model.value && res.models[0]) { model.value = res.models[0]; sync(); }
+          if (!model.value && res.models[0]) { model.value = res.models[0]; sync(); highlightModel(); }
         } else {
           status.textContent = 'Fetch failed: ' + (res.error || res.status || 'unknown');
         }
@@ -1346,8 +1434,10 @@ export function aiSelfTest() {
     out.endpoints = {
       chat: endpoint('chat/completions', { baseUrl: 'https://api.openai.com/v1/' }),
       models: endpoint('models', { baseUrl: 'https://api.openai.com/v1/' }),
+      geminiModels: endpoint('models', { provider: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com' }),
     };
     out.models = parseModelList({ data: [{ id: 'b-model' }, { id: 'a-model' }, { name: 'c-model' }] });
+    out.modelsDeduped = parseModelList({ data: [{ id: 'dup' }, { id: 'dup' }, { id: 'uniq' }] });
     out.geminiModels = parseModelList({
       models: [
         { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
@@ -1386,7 +1476,9 @@ export function aiSelfTest() {
       contentTypeAlways: out.headers.none['Content-Type'] === 'application/json',
       endpointChat: out.endpoints.chat === 'https://api.openai.com/v1/chat/completions',
       endpointModels: out.endpoints.models === 'https://api.openai.com/v1/models',
+      endpointModelsGemini: out.endpoints.geminiModels === 'https://generativelanguage.googleapis.com/v1beta/models',
       modelsParsedSorted: JSON.stringify(out.models) === JSON.stringify(['a-model', 'b-model', 'c-model']),
+      modelsDeduped: JSON.stringify(out.modelsDeduped) === JSON.stringify(['dup', 'uniq']),
       geminiModelsFiltered: JSON.stringify(out.geminiModels) === JSON.stringify(['gemini-2.5-flash']),
       geminiBaseStripsModels: out.gemini.base === 'https://generativelanguage.googleapis.com/v1beta',
       geminiEndpointBuilt: out.gemini.endpoint === 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',

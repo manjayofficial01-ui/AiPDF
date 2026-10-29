@@ -4,7 +4,7 @@ import {
 } from './viewer.js';
 import { el, rgbToCss, hexToRgb, rgbToHex, clamp, toast, uid } from './util.js';
 import { renderPageAnnotations } from './annots.js';
-import { groupTextBlocks, editForBlock, blockText, wrapBlockText, blocksFromOcrLines, flatOcrLines, ocrSplitSegments, ocrCellBlock, textEditDrawBox, textItemBoxes } from './textblocks.js';
+import { groupTextBlocks, editForBlock, blockText, wrapBlockText, blocksFromOcrLines, flatOcrLines, ocrSplitSegments, ocrCellBlock, textEditDrawBox, textItemBoxes, rectCentreInside } from './textblocks.js';
 import { rectUnion } from './textops.js';
 import { detectTables, tablesFromSegmentItems, tableForBlock, tableLabel } from './tables.js';
 import {
@@ -106,6 +106,33 @@ export function clearEditRegion() {
   emit('selection');
 }
 
+/* ── Region (marquee) OCR records ──────────────────────────────────────────
+ *
+ * A region read is kept APART from doc.ocr[page]. That record means "the whole
+ * page was recognised" — it feeds search, AI/ask and the saved invisible text
+ * layer — and a marquee read is not that. Mixing them is exactly how the area
+ * tool ended up showing the page's rows instead of the area's words.
+ */
+
+/** The marquee rectangle in force for a page, or null when there is none. */
+function currentRegionRect(pageIndex) {
+  const r = state.editRegion;
+  return r && r.page === pageIndex && Array.isArray(r.rect) ? r.rect : null;
+}
+
+/** Cache key: the area's own geometry, so a repaint reuses the read instead of
+ *  re-running the engine for a rectangle that was already recognised. */
+function regionKey(pageIndex, rect) {
+  return `${pageIndex}:${(rect || []).map((v) => Number(v).toFixed(1)).join(',')}`;
+}
+
+function regionOcrRecord(pageIndex, rect = currentRegionRect(pageIndex)) {
+  if (!rect) return null;
+  const doc = activeDoc();
+  const rec = doc?.ocrRegions?.[regionKey(pageIndex, rect)];
+  return rec && Array.isArray(rec.lines) ? rec : null;
+}
+
 function onMarqueeDown(e) {
   // Armed two ways: the Direct Editor panel's "Select area" toggle, or the
   // dedicated Area Direct Edit tool on the ribbon (next to Direct Editor).
@@ -158,14 +185,18 @@ function onMarqueeDown(e) {
       window.__aipdfAction('tool:editText');
     }
     const doc = activeDoc();
-    // A scan that has not been recognised yet: recognition runs on the whole
-    // page once (Tesseract needs the full render), but only the marquee's
-    // blocks become editable — which is the point.
-    if (doc?.pdf && !doc.ocr?.[page]) {
+    /* A scan: recognition runs on the marquee ALONE. The page render is
+     * cropped to this rectangle before the engine sees it, so a row that
+     * crosses the box is not recognised whole — only the words that really sit
+     * inside it are. This is the whole point of Area Direct Edit: the area is
+     * what gets read, not the page. */
+    if (doc?.pdf) {
       const native = await (async () => { try { return await getTextContent(page); } catch { return null; } })();
       if (!native || !native.items.some((it) => it.str && it.str.trim())) {
-        toast('Recognising the selected area…', 'info', 2000);
-        try { await recognizePageForEditing(page); } catch { /* the empty notice offers a retry */ }
+        if (!regionOcrRecord(page)) {
+          toast('Recognising the selected area…', 'info', 2500);
+          try { await recognizeRegionForEditing(page, state.editRegion.rect); } catch { /* the empty notice offers a retry */ }
+        }
       }
     }
     void renderEditableBlocks(page);
@@ -187,9 +218,22 @@ export async function editableSource(pageIndex) {
   const doc = activeDoc();
   if (!doc?.pdf || pageIndex < 0 || pageIndex >= doc.numPages) return { blocks: [], source: 'none' };
   const width = doc.pageSizes?.[pageIndex]?.w || 595;
+  const region = currentRegionRect(pageIndex);
   try {
     const tc = await getTextContent(pageIndex);
-    const native = groupTextBlocks(tc, width).filter((b) => (b.text || '').trim().length > 0);
+    let native = groupTextBlocks(tc, width).filter((b) => (b.text || '').trim().length > 0);
+    /* With an area in force, native text is cut down ITEM BY ITEM: a block is
+     * only as wide as the words the marquee actually covers. Filtering whole
+     * blocks afterwards is what let a row that ran past the box be edited as a
+     * unit — the words outside the selection included. */
+    if (native.length && region) {
+      const only = new Set(textItemBoxes(tc)
+        .filter((b) => rectCentreInside(b.rect, region))
+        .map((b) => b.index));
+      native = only.size
+        ? groupTextBlocks(tc, width, only).filter((b) => (b.text || '').trim().length > 0)
+        : [];
+    }
     if (native.length) {
       /* Tables are recognised HERE, before anything consumes the block list, so
        * that every consumer — the hit targets, the Direct Editor, replace-all,
@@ -199,14 +243,15 @@ export async function editableSource(pageIndex) {
       const found = detectTables(native, { page: pageIndex, pageW: width, pageH, ...(paths ? { paths } : {}) });
       const split = splitBlocksByCells(tc, native, found, width);
       tablesByBlocks.set(split.blocks, split.tables);
-      return { blocks: filterByRegion(pageIndex, split.blocks), source: 'native' };
+      return { blocks: split.blocks, source: 'native' };
     }
   } catch { /* fall through to OCR — an unreadable page is not an empty one */ }
 
-  const rec = doc.ocr?.[pageIndex];
+  // A region read wins over the page's own recognition: it IS the area.
+  const rec = regionOcrRecord(pageIndex, region) || doc.ocr?.[pageIndex];
   if (rec?.lines?.length) {
     const height = doc.pageSizes?.[pageIndex]?.h || 842;
-    const ocr = blocksFromOcrLines(rec.lines, width, height, rec.dpi || 200, pageIndex)
+    const ocr = blocksFromOcrLines(rec.lines, width, height, rec.dpi || 200, pageIndex, region)
       .filter((b) => (b.text || '').trim().length > 0);
     if (ocr.length) {
       /* Tables live on scans too — the tender-sheet case: one OCR "line"
@@ -214,9 +259,9 @@ export async function editableSource(pageIndex) {
        * whole table into a handful of row blocks. Detect the grid from OCR
        * column segments and rebuild ONE block per cell, exactly like the
        * native-text path does. */
-      const split = splitOcrBlocksByCells(rec, ocr, width, height, pageIndex);
+      const split = splitOcrBlocksByCells(rec, ocr, width, height, pageIndex, region);
       tablesByBlocks.set(split.blocks, split.tables);
-      return { blocks: filterByRegion(pageIndex, split.blocks), source: 'ocr' };
+      return { blocks: split.blocks, source: 'ocr' };
     }
     return { blocks: [], source: 'ocr-empty' };
   }
@@ -235,9 +280,10 @@ export async function editableSource(pageIndex) {
  * inside any table pass through untouched; a block whose text all lands in
  * table cells is replaced by its per-cell pieces.
  */
-function splitOcrBlocksByCells(rec, blocks, pageWidth, pageHeight, pageIndex) {
+function splitOcrBlocksByCells(rec, blocks, pageWidth, pageHeight, pageIndex, regionRect = null) {
   const dpi = rec.dpi || 200;
-  const flat = flatOcrLines(rec.lines, pageHeight, dpi);       // li = index into rec.lines
+  const flat = flatOcrLines(rec.lines, pageHeight, dpi)         // li = index into rec.lines
+    .filter((l) => !regionRect || rectCentreInside([l.x, l.bottom, l.end, l.top], regionRect));
   if (!flat.length) return { blocks, tables: [] };
   const flatByLi = new Map(flat.map((l) => [l.li, l]));
   const segments = ocrSplitSegments(flat);
@@ -380,15 +426,6 @@ function pageTables(pageIndex, blocks) {
   const known = tablesByBlocks.get(blocks);
   if (known) return known;
   return detectTables(blocks, tableDetectOptions(pageIndex));
-}
-
-/** Marquee filter: when an edit region is armed for this page, only blocks
- *  whose cover intersects the rectangle survive — "edit this area only". */
-function filterByRegion(pageIndex, blocks) {
-  const region = state.editRegion && state.editRegion.page === pageIndex ? state.editRegion.rect : null;
-  if (!region || !blocks.length) return blocks;
-  const hit = (r) => r[0] < region[2] && r[2] > region[0] && r[1] < region[3] && r[3] > region[1];
-  return blocks.filter((b) => hit(b.coverRect || b.rect));
 }
 
 /** Rules are read from the ORIGINAL bytes, which never change for an open
@@ -547,6 +584,44 @@ export async function recognizePageForEditing(pageIndex, opts = {}) {
     await renderEditableBlocks(pageIndex);
     const blocks = (await editableSource(pageIndex)).blocks.length;
     toast(`Recognised ${blocks} text block${blocks === 1 ? '' : 's'} on page ${pageIndex + 1}${rec.confidence ? ` · ${rec.confidence}% confidence` : ''}`, 'info');
+    return { ok: blocks > 0, blocks, confidence: rec.confidence };
+  } catch (e) {
+    const msg = String(e?.message || e);
+    toast(`OCR failed: ${msg.slice(0, 160)}`, 'error');
+    return { ok: false, error: msg };
+  }
+}
+
+/**
+ * Recognise ONLY the rectangle the user drew with the Area Direct Edit marquee.
+ *
+ * Distinct from recognizePageForEditing on purpose: that one reads the whole
+ * page (and marks it for the saved text layer); this one crops the render to
+ * the area before the engine sees it and stores the result under the area's own
+ * key, so the page's own recognition is never overwritten and no line from
+ * outside the box can become editable.
+ */
+export async function recognizeRegionForEditing(pageIndex, rect, opts = {}) {
+  const doc = activeDoc();
+  if (!doc) return { ok: false, error: 'No document open' };
+  if (!rect) return { ok: false, error: 'No area selected' };
+  const { recognizeRegionForEditing: run } = await import('./ocr.js');
+  try {
+    // Already read: reuse it. Re-dragging the same box must not re-run the
+    // engine — the rectangle is the cache key, and the geometry cannot change.
+    let rec = opts.force ? null : regionOcrRecord(pageIndex, rect);
+    if (!rec) {
+      rec = await run(pageIndex, rect, opts.langs || settings.ocrLang || 'eng', (m) => {
+        emit('ocrProgress', { page: pageIndex, status: m.status, progress: m.progress });
+      });
+    }
+    doc.ocrRegions = doc.ocrRegions || {};
+    doc.ocrRegions[regionKey(pageIndex, rect)] = rec;
+    await renderEditableBlocks(pageIndex);
+    const blocks = (await editableSource(pageIndex)).blocks.length;
+    toast(blocks
+      ? `Recognised ${blocks} text block${blocks === 1 ? '' : 's'} in the selected area${rec.confidence ? ` · ${rec.confidence}% confidence` : ''}`
+      : 'No text was recognised inside the selected area. Try drawing a slightly larger box.', blocks ? 'info' : 'warn');
     return { ok: blocks > 0, blocks, confidence: rec.confidence };
   } catch (e) {
     const msg = String(e?.message || e);

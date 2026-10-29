@@ -181,6 +181,12 @@ let tipsInitialised = false;
  * Resolve the tooltip text for a node. Reads `data-tip`; falls back to
  * `title` and, when falling back, MOVES the value into `data-tip` and
  * deletes `title` so the native browser tooltip does not double up.
+ *
+ * When `data-tip` is already present the node usually ALSO carries a `title`
+ * (the ribbon keeps `title` as the accessible name). The native tooltip
+ * would then appear alongside ours, so the title is retired on first hover
+ * — but only when a richer `data-tip` exists, because the title is the
+ * only thing we have otherwise.
  */
 export function tooltipFor(node) {
   if (!node || typeof node.getAttribute !== 'function') return '';
@@ -191,6 +197,9 @@ export function tooltipFor(node) {
       if (text) node.setAttribute('data-tip', text);
       node.removeAttribute('title');
     }
+  } else if (node.hasAttribute('title')) {
+    // A richer tooltip wins; drop the native one so the two never stack.
+    node.removeAttribute('title');
   }
   return text || '';
 }

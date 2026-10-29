@@ -110,6 +110,7 @@ const P = {
   markdown: 'M2.5 6.5h19v11h-19zM6 15V9l3 3.5L12 9v6',
   epub: 'M12 6.5C10 5 7 4.5 4 5v13c3-.5 6 0 8 1.5 2-1.5 5-2 8-1.5V5c-3-.5-6 0-8 1.5zM12 6.5v13',
   rtf: 'M6 3h8l4 4v14H6zM14 3v4h4M9 17l2.5-6 2.5 6M10 15h3',
+  word: 'M6 3h8l4 4v14H6zM14 3v4h4M8.5 12l1.4 5 1.6-3.6 1.6 3.6 1.4-5',
   plaintext: 'M4 6h16M4 10h16M4 14h12M4 18h8',
   // Stirling pack: compress (arrows into a box), booklet (open book + fold),
   // unlock (open shackle). Stroke-only, single-path, 24×24 grid.
@@ -126,6 +127,13 @@ const P = {
   marquee: 'M3 7V3h4M17 3h4v4M21 17v4h-4M7 21H3v-4M8 8h8v8H8z',
   // Favourite (star) fonts.
   star: 'M12 3.2l2.6 5.4 5.9.8-4.3 4.1 1 5.9-5.2-2.8-5.2 2.8 1-5.9L3.5 9.4l5.9-.8z',
+  // Menu / overflow affordances used by the redesigned ribbon and the
+  // quick-access customiser.
+  menu: 'M4 7h16M4 12h16M4 17h16',
+  dots: 'M6 12h.01M12 12h.01M18 12h.01',
+  pin: 'M9 3h6l-1 6 4 3v2H6v-2l4-3zM12 14v7',
+  // Keyboard — the shortcut reference panel in Settings.
+  keyboard: 'M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M8 14h8',
 };
 
 const cache = new Map();

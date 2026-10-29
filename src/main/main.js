@@ -813,27 +813,46 @@ async function cappedBody(res, cap) {
 
 ipcMain.handle('ai:models', async (_e, opts = {}) => {
   try {
-    const target = proxyTarget(opts.url);
-    if (!target) return { ok: false, error: 'The models endpoint must be an http(s) URL.' };
-    const res = await fetch(target, { method: 'GET', headers: opts.headers || {} });
-    if (!res.ok) {
-      const text = (await res.text().catch(() => '')).slice(0, 400);
-      return { ok: false, status: res.status, error: text };
+    const base = proxyTarget(opts.url);
+    if (!base) return { ok: false, error: 'The models endpoint must be an http(s) URL.' };
+    const gemini = /generativelanguage\.googleapis\.com|\/v1beta(\/|$)/i.test(base);
+    const collected = [];
+    let pageToken = '';
+    let after = '';
+    // Follow the provider's pagination. Gemini returns 50 models per page by
+    // default, so a single request silently dropped everything past the first
+    // 50; ask for the maximum and keep going while nextPageToken is present.
+    for (let page = 0; page < 50; page++) {
+      const u = new URL(base);
+      if (gemini) {
+        u.searchParams.set('pageSize', '1000');
+        if (pageToken) u.searchParams.set('pageToken', pageToken);
+      } else if (after) {
+        u.searchParams.set('after', after);
+      }
+      const res = await fetch(u.toString(), { method: 'GET', headers: opts.headers || {} });
+      if (!res.ok) {
+        const text = (await res.text().catch(() => '')).slice(0, 400);
+        return { ok: false, status: res.status, error: text };
+      }
+      const text = (await cappedBody(res, MODEL_LIST_CAP)).toString('utf8');
+      let json;
+      try { json = JSON.parse(text); } catch { return { ok: false, status: res.status, error: 'Invalid JSON from the models endpoint.' }; }
+      const raw = Array.isArray(json.data) ? json.data : Array.isArray(json.models) ? json.models : [];
+      for (const m of raw) {
+        if (typeof m === 'string') { collected.push(m); continue; }
+        // Google lists embedding/tts models here too — only keep the ones that
+        // can actually answer a generateContent call.
+        if (m && Array.isArray(m.supportedGenerationMethods) && !m.supportedGenerationMethods.includes('generateContent')) continue;
+        const id = String((m && (m.id || m.name)) || '').replace(/^models\//, '');
+        if (id) collected.push(id);
+      }
+      const next = json.nextPageToken || json.next_page_token || '';
+      if (next && next !== pageToken) { pageToken = next; continue; }
+      if (json.has_more === true && json.last_id && json.last_id !== after) { after = json.last_id; continue; }
+      break;
     }
-    const text = (await cappedBody(res, MODEL_LIST_CAP)).toString('utf8');
-    let json = {};
-    try { json = JSON.parse(text); } catch { return { ok: false, status: res.status, error: 'Invalid JSON from the models endpoint.' }; }
-    const raw = Array.isArray(json.data) ? json.data : Array.isArray(json.models) ? json.models : [];
-    const models = raw
-      .map((m) => {
-        if (typeof m === 'string') return m;
-        // Google Gemini lists embedding/tts models here too — only keep the
-        // ones that can actually answer a generateContent call.
-        if (m && Array.isArray(m.supportedGenerationMethods) && !m.supportedGenerationMethods.includes('generateContent')) return '';
-        return String((m && (m.id || m.name)) || '').replace(/^models\//, '');
-      })
-      .filter(Boolean);
-    models.sort((a, b) => a.localeCompare(b));
+    const models = [...new Set(collected)].sort((a, b) => a.localeCompare(b));
     return { ok: true, models };
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };

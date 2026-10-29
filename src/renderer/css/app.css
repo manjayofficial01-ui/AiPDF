@@ -1583,6 +1583,28 @@ body.space-pan.panning #pages, body.space-pan.panning .canvas-wrap { cursor: gra
 .font-row:last-child { border-bottom: 0; }
 .font-row:hover { background: var(--field-bg); }
 .font-row.on { background: var(--selection); box-shadow: inset 0 0 0 2px var(--accent); }
+
+/* AI model picker: a scrollable catalogue. A <datalist> dropdown could not be
+   scrolled through a long list, so fetched models get their own pane. */
+.model-pick {
+  /* `flex: none` is essential: .modal-body is a flex column, and without it
+     this box shrank to a single row (a scroll container's auto min-height is
+     0). It must keep its own height and scroll internally. */
+  flex: none;
+  max-height: 220px; overflow-y: auto; margin-top: 2px;
+  border: 1px solid var(--border-control); border-radius: 4px;
+  background: var(--field-bg);
+  scrollbar-width: thin;
+}
+.model-row {
+  display: block; width: 100%; padding: 5px 10px; text-align: left; cursor: pointer;
+  background: none; border: 0; border-bottom: 1px solid var(--border-control);
+  color: var(--text-1); font: inherit;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.model-row:last-child { border-bottom: 0; }
+.model-row:hover { background: var(--selection); }
+.model-row.on { background: var(--selection); box-shadow: inset 0 0 0 2px var(--accent); font-weight: 600; }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
   gap: var(--space-2);
@@ -1590,7 +1612,14 @@ body.space-pan.panning #pages, body.space-pan.panning .canvas-wrap { cursor: gra
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   flex: none;
+  /* The title bar is the drag handle for the whole dialog. */
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
 }
+.modal-head button, .modal-head a { cursor: pointer; }
+body.modal-dragging, body.modal-dragging .modal-head { cursor: grabbing; }
+body.modal-dragging { user-select: none; }
 .modal-head h3 {
   margin: 0; font-size: var(--text-md);
   font-weight: var(--weight-semibold); color: var(--text-1);
@@ -1962,6 +1991,27 @@ label.cb:focus-within { outline: var(--ring-w) solid var(--ring); outline-offset
   background: var(--accent);
   transition: width var(--dur-base) var(--ease-out);
 }
+
+/* PDF → Word progress overlay: an indeterminate shimmer while preparing, then
+   a determinate bar + percentage as the model reads each page. */
+.p2w-overlay {
+  position: fixed; inset: 0; z-index: var(--z-modal);
+  background: var(--scrim);
+  display: grid; place-items: center;
+  animation: atelier-fade var(--dur-fast) var(--ease-out);
+}
+.p2w-card {
+  width: 380px; max-width: calc(100vw - 32px);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elev-4);
+  padding: 18px 20px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.p2w-title { font-weight: var(--weight-semibold); color: var(--text-1); font-size: var(--text-md); }
+.p2w-label { font-size: var(--text-sm); color: var(--text-2); min-height: 1.2em; }
+.p2w-pct { font-size: var(--text-sm); color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; }
 
 /* Toasts — lifted clear of the zoom pill so the two never collide. */
 .toast-root {
@@ -2881,3 +2931,363 @@ body.img-edit-busy, body.img-edit-busy * { cursor: progress !important; }
 }
 .img-crop-note { font-size: var(--text-xs); color: var(--text-2); padding: 0 4px; }
 body.img-crop-mode #pages, body.img-crop-mode .page { cursor: crosshair; }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   UI REDESIGN — labelled ribbon, quick access, properties scope, settings,
+   density. Semantic tokens only; no colour literals, no primitive tokens.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Density ──────────────────────────────────────────────────────────────
+   Two chrome densities for one codebase. `compact` tightens the control
+   heights, the base type, the ribbon and the side panels together so a small
+   laptop screen can hold a document and its properties at once. The tokens
+   overridden here are the same semantic size tokens the components already
+   consume, so nothing needs a parallel set of component rules. */
+body.density-comfortable { --h-ribbon: 64px; }
+body.density-compact {
+  --ctl-md: 24px;
+  --ctl-sm: 22px;
+  --ctl-xs: 20px;
+  --ctl-rbtn: 28px;
+  --text-base: 12px;
+  --w-side: 244px;
+  --w-ctx: 268px;
+  --h-ribbon: 52px;
+}
+
+/* ── Ribbon: large labelled primary buttons ─────────────────────────────────
+   Foxit's pattern: the tools people reach for on every page get an icon over
+   a text label, so the ribbon can be read instead of decoded. The rest of the
+   tools stay icon-only — the label budget is spent where it pays. */
+.rbtn.large {
+  width: auto;
+  min-width: 54px;
+  height: 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-05);
+  padding: var(--space-05) var(--space-2);
+  color: var(--text-2);
+}
+.rbtn.large svg { width: 20px; height: 20px; }
+.rbtn.large .rlabel {
+  display: block;
+  font-size: var(--text-xs);
+  line-height: 1.1;
+  font-weight: var(--weight-medium);
+  color: var(--text-2);
+  max-width: 68px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+.rbtn.large .rkey {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-4);
+}
+.rbtn.large.active .rlabel {
+  color: var(--accent-ink);
+  font-weight: var(--weight-semibold);
+}
+.rbtn .rkey { display: none; }   /* only the large variant shows a chip */
+
+body.density-compact .rbtn.large { min-width: 48px; height: 44px; }
+body.density-compact .rbtn.large .rlabel { font-size: 10px; max-width: 58px; }
+
+/* ── Ribbon overflow ───────────────────────────────────────────────────────
+   When the tab is wider than the window the groups scroll sideways; this
+   button, pinned to the right edge above the scroll fade, opens a menu of
+   every command on the tab so nothing is stranded out of reach. */
+.ribbon-overflow {
+  position: sticky;
+  right: 0;
+  top: 0;
+  z-index: 2;
+  flex: 0 0 auto;
+  align-self: center;
+  width: 26px;
+  height: 26px;
+  margin-left: calc(-1 * var(--space-7));
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-2);
+}
+.ribbon-overflow:hover { background: var(--tool-hover); color: var(--text-1); }
+.ribbon-overflow svg { width: 15px; height: 15px; }
+
+/* The right-edge scroll fade only earns its place when the ribbon actually
+   overflows; always-on it faded the last group's own title on a ribbon that
+   fitted comfortably. */
+.ribbon::after { opacity: 0; transition: opacity var(--dur-fast) var(--ease-out); }
+.ribbon.is-overflowing::after { opacity: 1; }
+
+/* ── Quick access ──────────────────────────────────────────────────────────
+   Pinned tools render ahead of Open / Save / Undo, exactly like the Acrobat
+   and Foxit quick-access toolbar. */
+.qpinned { display: flex; align-items: center; gap: 1px; }
+.qbtn.pinned { color: var(--accent-ink); }
+.qbtn.pinned.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent-ink);
+}
+.quick .qcustom { color: var(--text-3); }
+.quick .qcustom:hover { color: var(--text-1); }
+.quick .qsep { margin: 0 var(--space-1); }
+
+/* ── Quick-access customiser ─────────────────────────────────────────────── */
+.qa-custom { display: flex; flex-direction: column; gap: var(--space-2); }
+.qa-hint { font-size: var(--text-xs); color: var(--text-3); }
+.qa-list {
+  display: flex; flex-direction: column; gap: 1px;
+  max-height: 330px; overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1);
+}
+.qa-row {
+  display: flex; align-items: center; gap: var(--space-15);
+  padding: var(--space-05) var(--space-1);
+  border-radius: var(--radius-xs);
+}
+.qa-row.on { background: var(--accent-softer); }
+.qa-check {
+  display: flex; align-items: center; gap: var(--space-2);
+  flex: 1; min-width: 0; cursor: pointer;
+  font-size: var(--text-sm); color: var(--text-1);
+}
+.qa-check input { accent-color: var(--accent); width: 14px; height: 14px; flex: none; }
+.qa-ico { display: grid; place-items: center; color: var(--text-3); flex: none; }
+.qa-ico svg { width: 15px; height: 15px; }
+.qa-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qa-key { font-size: var(--text-xs); color: var(--text-4); font-family: var(--font-mono); flex: none; }
+.qa-move {
+  width: 22px; height: 22px; flex: none;
+  display: grid; place-items: center;
+  padding: 0;
+  border: 1px solid transparent; border-radius: var(--radius-xs);
+  background: transparent; color: var(--text-3);
+}
+.qa-move:hover { background: var(--tool-hover); color: var(--text-1); }
+.qa-move svg { width: 13px; height: 13px; }
+
+/* ── Properties panel: scope strip ─────────────────────────────────────────
+   States WHAT the controls below act on. Without it the same "Colour" row
+   silently meant the tool default, then the selected object's colour, then
+   the page. */
+.ctx-scope {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-15) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-sunken);
+  flex: none;
+}
+.ctx-scope-icon {
+  display: grid; place-items: center; flex: none;
+  width: 26px; height: 26px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+.ctx-scope-icon svg { width: 15px; height: 15px; }
+.ctx-scope-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ctx-scope-name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-1);
+}
+.ctx-scope-sub { font-size: var(--text-xs); color: var(--text-3); }
+
+/* ── Properties panel: collapsible sections ─────────────────────────────────
+   A long panel (the Direct Editor alone carries Appearance, Story, Table and
+   Composition) otherwise has to be re-collapsed after every selection
+   change; the fold state is remembered per section. */
+.prop-group.collapsible > .prop-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-15);
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-xs);
+}
+.prop-group.collapsible > .prop-title:hover { color: var(--text-2); }
+.prop-group.collapsible > .prop-title:focus-visible {
+  outline: var(--ring-w) solid var(--ring);
+  outline-offset: var(--ring-inset);
+}
+.prop-group.collapsed > .prop-body { display: none; }
+.prop-title .caret {
+  margin-left: auto;
+  flex: none;
+  display: grid; place-items: center;
+  color: var(--text-4);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.prop-title .caret svg { width: 13px; height: 13px; }
+.prop-group.collapsed > .prop-title .caret { transform: rotate(-90deg); }
+
+/* ── Settings dialog ───────────────────────────────────────────────────────
+   A tabbed preferences dialog. The old one exposed three settings; this
+   exposes every real preference, grouped the way a professional editor
+   groups them. */
+.settings-shell {
+  display: flex;
+  gap: var(--space-4);
+  align-items: stretch;
+  min-height: 420px;
+}
+.settings-nav {
+  width: 186px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: var(--space-2);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+.settings-nav button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  text-align: left;
+  padding: var(--space-15) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+.settings-nav button:hover { background: var(--tool-hover); color: var(--text-1); }
+.settings-nav button.active {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: var(--weight-semibold);
+}
+.settings-nav button svg { width: 16px; height: 16px; flex: none; }
+.settings-pane {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding-left: var(--space-2);
+}
+.set-group { margin-bottom: var(--space-5); }
+.set-group-title {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  color: var(--text-3);
+  font-weight: var(--weight-semibold);
+  padding-bottom: var(--space-1);
+  margin-bottom: var(--space-1);
+  border-bottom: 1px solid var(--border);
+}
+.set-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-15) 0;
+  border-bottom: 1px solid var(--border);
+}
+.set-row:last-child { border-bottom: 0; }
+.set-text { flex: 1; min-width: 0; }
+.set-label { font-size: var(--text-sm); color: var(--text-1); }
+.set-hint { font-size: var(--text-xs); color: var(--text-3); margin-top: 2px; }
+.set-ctl {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-15);
+}
+.set-ctl select,
+.set-ctl input[type="text"],
+.set-ctl input[type="number"],
+.set-ctl input[type="password"] { min-width: 150px; }
+.set-ctl input[type="color"] {
+  width: 30px; height: 24px; padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+}
+.set-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-15);
+  cursor: pointer;
+}
+.set-switch input {
+  accent-color: var(--accent);
+  width: 15px; height: 15px;
+  margin: 0;
+  cursor: pointer;
+}
+.set-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.set-val {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  min-width: 34px;
+  text-align: right;
+}
+.set-presets { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.set-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-15);
+  padding: var(--space-05) var(--space-15);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+.set-chip-swatch {
+  width: 12px; height: 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  flex: none;
+}
+.set-chip-label { font-family: var(--font-mono); }
+.set-shortcuts { max-height: 320px; overflow-y: auto; }
+.set-shortcuts table { width: 100%; border-collapse: collapse; }
+.set-shortcuts td {
+  padding: var(--space-05) var(--space-15);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  border-bottom: 1px solid var(--border);
+}
+.set-shortcuts td:first-child {
+  font-family: var(--font-mono);
+  color: var(--text-1);
+  white-space: nowrap;
+}
+
+/* ── Command palette extras ──────────────────────────────────────────────── */
+.pitem .plk { color: var(--text-4); }
+.pitem.recent .plt { color: var(--accent-ink); }
+.pempty {
+  padding: var(--space-5) var(--space-3);
+  text-align: center;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+

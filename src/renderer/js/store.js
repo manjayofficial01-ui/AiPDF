@@ -38,6 +38,31 @@ export const DEFAULT_SETTINGS = {
   // (menubar + ribbon) for a distraction-free view; the title bar stays.
   ribbonMode: 'expanded',
   chromeHidden: false,
+  // Chrome density. `comfortable` is the default; `compact` tightens the
+  // control heights, the ribbon and the side panels for small laptop screens.
+  density: 'comfortable',        // comfortable | compact
+  // How the ribbon labels its buttons. `auto` shows a text label only under
+  // the large primary tools; `always` labels every button; `never` is the
+  // original icon-only ribbon.
+  ribbonLabels: 'auto',          // auto | always | never
+  // Reopen on the ribbon tab you left, instead of always starting on Home.
+  restoreRibbonTab: true,
+  lastRibbonTab: 'Home',
+  // Quick-access toolbar: the tools the user pins for one-click reach.
+  // Empty means "the defaults only" (hand + select are always available).
+  pinnedTools: [],
+  // View flags. These were READ by the ribbon (settings.grid) and by
+  // applySettingsToState (settings.coverPage / settings.reverse) but were
+  // never defined here, so they were always undefined and the Grid toggle
+  // could never show itself as active.
+  grid: false,
+  coverPage: false,
+  reverse: false,
+  showRulers: false,
+  // Command-palette recents: the action ids you used most recently.
+  recentCommands: [],
+  // Properties-panel sections the user has collapsed. Keyed by section label.
+  collapsedProps: [],
   measureUnit: 'cm',             // cm | mm | in | pt — PDF space is 1/72 inch
   ocrLang: 'eng+nep',            // default recognition: English + Nepali (auto-detects both)
   favoriteFonts: [],             // starred font families — surface in every font picker
@@ -173,6 +198,7 @@ export const state = {
   ai: { dockOpen: false, messages: [], busy: false, mode: 'chat' },
   editRegion: null,       // { page, rect: [x0,y0,x1,y1] } — marquee-limited editing area
   editRegionMode: false,  // armed: the next page drag draws the marquee
+  textWriteMode: false,   // Text box tool: double-click arms an I-beam writing cursor
   busy: false,
 };
 

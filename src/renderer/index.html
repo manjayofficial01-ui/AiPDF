@@ -37,6 +37,12 @@
   <!-- ── Mode tabs + quick access ───────────────────────────────────────── -->
   <div class="menubar">
     <div class="quick">
+      <!-- User-pinned tools (ribbon right-click → "Pin to quick access", or
+           Settings → Quick access). Pinned tools render first, ahead of the
+           fixed file/undo/view buttons, exactly like the Acrobat and Foxit
+           quick-access toolbar. -->
+      <div class="qpinned" id="quickPinned"></div>
+      <span class="sep qsep" id="qSep" hidden></span>
       <button class="qbtn" data-act="file:open" title="Open (Ctrl+O)"></button>
       <button class="qbtn" data-act="file:save" title="Save (Ctrl+S)"></button>
       <button class="qbtn" data-act="file:print" title="Print (Ctrl+P)"></button>
@@ -54,6 +60,7 @@
       <button class="qbtn" data-act="view:pages" title="Pages"></button>
       <button class="qbtn" data-act="view:comments" title="Comments"></button>
       <button class="qbtn" data-act="view:ai" title="AI Assistant"></button>
+      <button class="qbtn qcustom" id="btnQuickCustomize" title="Customize quick access" aria-label="Customize quick access"></button>
     </div>
     <div class="modes" id="modeTabs" role="tablist" aria-label="Editor modes"></div>
     <div class="mb-right">
@@ -150,6 +157,10 @@
         <span id="ctxTitle">Properties</span>
         <button class="icon-btn sm" id="ctxClose" aria-label="Hide panel" title="Hide panel"></button>
       </div>
+      <!-- Scope strip: states WHAT the properties below apply to (which
+           object, which page, which tool defaults). Without it the panel
+           silently changed meaning as the selection changed. -->
+      <div class="ctx-scope" id="ctxScope" hidden></div>
       <div class="ctx-body" id="ctxBody"></div>
     </aside>
   </main>

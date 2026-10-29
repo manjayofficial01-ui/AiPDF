@@ -10,6 +10,62 @@ let openCount = 0;
 
 const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
+/**
+ * Let a dialog be moved by dragging its header.
+ *
+ * The backdrop centres the modal with a grid, so the first drag detaches it
+ * from that centring at the exact pixel it already occupies (fixed left/top),
+ * then tracks the pointer. Header buttons — the close X — keep their own
+ * click: a press that starts on one never begins a drag. The modal is kept
+ * partly on screen so it can always be grabbed again.
+ */
+function makeDraggable(modalEl, head) {
+  const MIN_VISIBLE = 56;          // px of the modal that must stay on screen
+  let drag = null;
+
+  // Listen on the window while dragging: the pointer regularly leaves the
+  // narrow header, and a capture-phase listener there would drop the gesture.
+  const onMove = (e) => {
+    if (!drag) return;
+    const left = Math.min(window.innerWidth - MIN_VISIBLE,
+      Math.max(MIN_VISIBLE - drag.w, drag.left + (e.clientX - drag.x)));
+    const top = Math.min(window.innerHeight - MIN_VISIBLE,
+      Math.max(0, drag.top + (e.clientY - drag.y)));
+    modalEl.style.left = `${left}px`;
+    modalEl.style.top = `${top}px`;
+  };
+  const onUp = () => {
+    if (!drag) return;
+    drag = null;
+    window.removeEventListener('pointermove', onMove, true);
+    window.removeEventListener('pointerup', onUp, true);
+    window.removeEventListener('pointercancel', onUp, true);
+    document.body.classList.remove('modal-dragging');
+  };
+
+  head.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    // The close button (and anything else interactive) is not a handle.
+    if (e.target.closest && e.target.closest('button, a, input, select, textarea, [role="button"]')) return;
+    const r = modalEl.getBoundingClientRect();
+    // Detach from the grid centring without moving a pixel.
+    modalEl.style.position = 'fixed';
+    modalEl.style.margin = '0';
+    modalEl.style.left = `${r.left}px`;
+    modalEl.style.top = `${r.top}px`;
+    // Stop the entrance animation: a running transform would override the
+    // inline one and make the modal jump on the first drag.
+    modalEl.style.animation = 'none';
+    modalEl.style.transform = 'none';
+    drag = { x: e.clientX, y: e.clientY, left: r.left, top: r.top, w: r.width };
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('pointercancel', onUp, true);
+    document.body.classList.add('modal-dragging');
+    e.preventDefault();
+  });
+}
+
 /** Live query of visible, enabled focusable elements inside `container`. */
 function focusables(container) {
   return Array.from(container.querySelectorAll(FOCUSABLE)).filter((n) => {
@@ -85,6 +141,10 @@ export function showModal(opts) {
       head.appendChild(x);
     }
     modalEl.appendChild(head);
+    // Every dialog can be moved out of the way by its title bar — a long
+    // "Edit text" box over the text you are comparing against is the case
+    // that makes this necessary.
+    makeDraggable(modalEl, head);
 
     const bodyEl = el('div', { class: 'modal-body' });
     modalEl.appendChild(bodyEl);

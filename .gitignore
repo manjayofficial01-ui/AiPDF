@@ -5,6 +5,7 @@ node_modules/
 dist*/
 .superpowers/
 .workbuddy-ai/
+pdf2word-max/
 *.log
 .DS_Store
 .scratch/

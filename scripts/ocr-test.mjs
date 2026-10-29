@@ -112,6 +112,19 @@ if (box) {
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1, buttons: 1 });
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1, buttons: 0 });
   await sleep(1000);
+  // Clicking a fresh block now asks for the text first (prefilled with the
+  // detected text). An OCR block is usually MULTI-LINE, and there Enter starts
+  // a new line rather than applying — so accept the detected text through the
+  // modal's primary button, which works for both single- and multi-line text.
+  if (await ev(`!!document.querySelector('.de-ask-text')`)) {
+    await ev(`(function(){
+      var m = document.querySelector('.modal');
+      var b = m && m.querySelector('button.primary');
+      if (b) { b.click(); return true; }
+      return false;
+    })()`);
+    await sleep(700);
+  }
 }
 const surfaceOpen = await ev(`!!document.querySelector('.direct-editor-surface')`);
 check('clicking a recognised block opens the Direct Editor', surfaceOpen);

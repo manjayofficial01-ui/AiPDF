@@ -396,6 +396,142 @@ export async function recognizePageForEditing(pageIndex, langs = 'eng', onProgre
 
 function clampNum(v, lo, hi) { return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : lo; }
 
+/** True when a rectangle's CENTRE lies inside `box` — the containment test the
+ *  Area Direct Edit marquee uses, so a line that merely grazes the box (a full
+ *  row running past it) is not mistaken for text the user selected. */
+function centreInside(r, box) {
+  if (!Array.isArray(r) || r.length !== 4 || !Array.isArray(box) || box.length !== 4) return false;
+  const cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
+  return cx >= box[0] && cx <= box[2] && cy >= box[1] && cy <= box[3];
+}
+
+/** True when a word's box reaches the very edge of the crop — i.e. the box cut
+ *  the word in half and the engine only read the visible fragment ("docum").
+ *  A fragment is not text the user selected, so it is dropped rather than
+ *  offered for editing. */
+function cutByCrop(r, rect, pad = 4) {
+  if (!Array.isArray(r) || r.length !== 4 || !r.every(Number.isFinite)) return false;
+  // Horizontally strict: a word has to sit WHOLE inside the box (half a point
+  // of slack for the engine's own bbox jitter). Anything reaching out either
+  // side was sliced by the marquee and is a fragment, not selected text.
+  const SLACK = 0.5;
+  if (r[0] <= rect[0] - SLACK || r[2] >= rect[2] + SLACK) return true;
+  // Vertically lenient: a tight box must still keep the line it wraps, even
+  // though a word's box carries ascenders and descenders past the text band.
+  // Only a word actually clipped by the crop's own edge is a fragment.
+  return r[1] <= rect[1] - pad + 1.5 || r[3] >= rect[3] + pad - 1.5;
+}
+
+/** Crop-pixel bbox → page PDF rect, through the render viewport's inverse.
+ *  `ox/oy` is the crop's origin inside the full-page render. */
+function cropRectToPdf(vp, ox, oy, bb) {
+  const pts = [[bb.x0, bb.y0], [bb.x1, bb.y0], [bb.x1, bb.y1], [bb.x0, bb.y1]]
+    .map(([x, y]) => vp.convertToPdfPoint(x + ox, y + oy));
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+/**
+ * Recognise ONLY the rectangle the user drew (Area Direct Edit).
+ *
+ * The page is rendered once, then CROPPED to the marquee before the engine
+ * ever sees it — so nothing outside the box can be recognised, and no row
+ * that merely crosses the box is dragged in whole. A few points of padding
+ * are kept around the crop (Tesseract reads better with a little context),
+ * and any line whose centre falls outside the true rectangle is dropped
+ * afterwards, so the padding can never widen the selection.
+ *
+ * Geometry comes back as true PDF rects on every line and word (`pdfRect`),
+ * which is what the Direct Editor, the per-cell table split and the cover
+ * machinery all read. The result is NOT written to `doc.ocr[page]` — that
+ * record means "the whole page was read", and a region read is not one.
+ */
+export async function recognizeRegionForEditing(pageIndex, rect, langs = 'eng', onProgress) {
+  const doc = activeDocRef();
+  if (!doc) throw new Error('No document open');
+  if (!Array.isArray(rect) || rect.length !== 4 || !rect.every(Number.isFinite)) {
+    throw new Error('Recognising an area needs a rectangle');
+  }
+  const { renderPageToCanvas, pageRenderViewport } = await import('./viewer.js');
+  // Same resolution policy as the full-page editing path: 300 DPI minimum,
+  // raised by the user's own setting. A small crop is CHEAPER than a page, so
+  // there is no reason to drop below it.
+  const dpi = clampNum(Math.max(Number(settings.ocr && settings.ocr.dpi) || 300, 300), 250, 400);
+  if (onProgress) onProgress({ status: 'rendering area', progress: 0.1 });
+  const vp = await pageRenderViewport(pageIndex, dpi);
+  const full = await renderPageToCanvas(pageIndex, dpi);
+
+  // Crop → canvas pixels. PDF space has y upward, canvas y downward, so the
+  // rectangle's TOP (rect[3]) is the smaller canvas y.
+  const PAD = 4;                                     // points of context for the engine
+  const pad = [rect[0] - PAD, rect[1] - PAD, rect[2] + PAD, rect[3] + PAD];
+  const p0 = vp.convertToViewportPoint(pad[0], pad[3]);
+  const p1 = vp.convertToViewportPoint(pad[2], pad[1]);
+  const sx = Math.max(0, Math.floor(Math.min(p0[0], p1[0])));
+  const sy = Math.max(0, Math.floor(Math.min(p0[1], p1[1])));
+  const sw = Math.min(full.width - sx, Math.ceil(Math.abs(p1[0] - p0[0])));
+  const sh = Math.min(full.height - sy, Math.ceil(Math.abs(p1[1] - p0[1])));
+  const empty = { text: '', lines: [], confidence: 0, langs, engine: 'tesseract', at: Date.now(), dpi, rect: rect.slice(), page: pageIndex };
+  try {
+    if (sw < 4 || sh < 4) return empty;
+    const crop = document.createElement('canvas');
+    crop.width = sw;
+    crop.height = sh;
+    const cctx = crop.getContext('2d');
+    cctx.fillStyle = '#fff';
+    cctx.fillRect(0, 0, sw, sh);
+    cctx.drawImage(full, sx, sy, sw, sh, 0, 0, sw, sh);
+    if (onProgress) onProgress({ status: 'reading the selected area', progress: 0.35 });
+    // pageIndex null: a region read is stored by the caller, never as the
+    // page's own OCR record.
+    const rec = await ocrCanvas(crop, langs, onProgress, null, dpi);
+    const kept = [];
+    for (const l of rec.lines || []) {
+      if (l.bbox) l.pdfRect = cropRectToPdf(vp, sx, sy, l.bbox);
+      for (const w of l.words || []) if (w.bbox) w.pdfRect = cropRectToPdf(vp, sx, sy, w.bbox);
+      /* Word-level trim. The padding lets the engine see a sliver of the
+       * NEIGHBOURING text, which it happily reads as a truncated word hanging
+       * off the edge ("printed docum…"). A word belongs to the area when its
+       * middle does; anything else is dropped and the line's text is rebuilt
+       * from what survived, so no half-word from outside the box is ever
+       * editable. */
+      const wordsIn = (l.words || []).filter((w) => centreInside(w.pdfRect, rect) && !cutByCrop(w.pdfRect, rect));
+      // Every word of the line is outside the box or was sliced by its edge:
+      // the line has nothing of its own here.
+      if (!wordsIn.length && (l.words || []).length) continue;
+      if (wordsIn.length && wordsIn.length < (l.words || []).length) {
+        l.words = wordsIn;
+        l.text = wordsIn.map((w) => String(w.text || '').trim()).filter(Boolean).join(' ');
+        l.pdfRect = [
+          Math.min(...wordsIn.map((w) => w.pdfRect[0])),
+          Math.min(...wordsIn.map((w) => w.pdfRect[1])),
+          Math.max(...wordsIn.map((w) => w.pdfRect[2])),
+          Math.max(...wordsIn.map((w) => w.pdfRect[3])),
+        ];
+      }
+      // Geometry stops at the box: a kept word's own rect can reach into the
+      // padding by a point or two, and the block must not follow it out.
+      if (l.pdfRect) {
+        l.pdfRect = [Math.max(l.pdfRect[0], rect[0]), l.pdfRect[1],
+          Math.min(l.pdfRect[2], rect[2]), l.pdfRect[3]];
+      }
+      if (centreInside(l.pdfRect, rect) && String(l.text || '').trim()) kept.push(l);
+    }
+    rec.lines = kept;
+    rec.text = kept.map((l) => l.text).join('\n');
+    rec.rect = rect.slice();
+    rec.page = pageIndex;
+    rec.dpi = dpi;
+    rec.imageSize = [sw, sh];
+    // A region read is for editing, never saved as the page's invisible text
+    // layer: that would make the file searchable for the area only.
+    rec.forEditing = false;
+    return rec;
+  } finally {
+    try { full.width = full.height = 0; } catch { /* ignore */ }
+  }
+}
+
 export async function terminateOcr() {
   if (worker) { try { await worker.terminate(); } catch { /* ignore */ } worker = null; workerLangs = ''; }
 }

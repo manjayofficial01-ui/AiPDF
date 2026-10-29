@@ -30,6 +30,18 @@ const rotBucket = (rad) => (Math.round((rad * 180) / Math.PI / 90) * 90 + 360) %
 
 const clampNum = (v, lo, hi) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : lo);
 
+/** True when `r`'s CENTRE lies inside `box`.
+ *
+ *  The Area Direct Edit marquee uses this, not plain intersection: a full row
+ *  of text that runs past the box intersects it, and an intersection test
+ *  makes the whole row editable — text the user never selected. A line is
+ *  "in the area" when its middle is in the area. */
+export function rectCentreInside(r, box) {
+  if (!Array.isArray(r) || r.length !== 4 || !Array.isArray(box) || box.length !== 4) return false;
+  const cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
+  return cx >= box[0] && cx <= box[2] && cy >= box[1] && cy <= box[3];
+}
+
 /**
  * Turn pdf.js text items into geometric blocks.
  *
@@ -184,8 +196,10 @@ export function groupTextBlocks(tc, pageWidth = 595, only = null) {
  * bbox is in canvas pixels at `dpi`; the page is `pageHeight` points tall.
  * PDF space has y increasing upward, canvas has it downward — hence the flip.
  */
-export function blocksFromOcrLines(lines, pageWidth, pageHeight, dpi = 200, pageIndex = 0) {
-  const flat = flatOcrLines(lines, pageHeight, dpi);
+export function blocksFromOcrLines(lines, pageWidth, pageHeight, dpi = 200, pageIndex = 0, regionRect = null) {
+  let flat = flatOcrLines(lines, pageHeight, dpi);
+  // An active marquee keeps only the lines that really live in it.
+  if (regionRect) flat = flat.filter((l) => rectCentreInside([l.x, l.bottom, l.end, l.top], regionRect));
   if (!flat.length) return [];
 
   /* Snapping the raw estimates to the page's modal size is the difference

@@ -422,6 +422,8 @@ function buildMenu(send, opts = {}) {
     {
       label: '&Convert',
       submenu: [
+        { label: 'PDF to Word (AI)…', click: () => send('convert:toWord') },
+        { type: 'separator' },
         { label: 'PDF to HTML…', click: () => send('convert:toHtml') },
         { label: 'PDF to RTF…', click: () => send('convert:toRtf') },
         { label: 'PDF to EPUB…', click: () => send('convert:toEpub') },

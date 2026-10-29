@@ -1,7 +1,7 @@
 {
   "name": "aipdf-editor",
   "productName": "AiPDF Editor",
-  "version": "2.20.0",
+  "version": "2.22.6",
   "description": "AiPDF Editor — a modern Electron-based PDF viewer & editor with AI assistance, contract intelligence, smart redaction, multi-provider read-aloud and an agentic AI bot",
   "main": "src/main/main.js",
   "author": "manjayofficial01-ui",
@@ -36,6 +36,9 @@
     "test:flatobject": "node scripts/flat-object-test.mjs",
     "test:overset": "node scripts/overset-badge-test.mjs",
     "test:direct": "node scripts/direct-edit-test.mjs",
+    "test:arearegion": "node scripts/area-region-ocr-test.mjs",
+    "test:modaldrag": "node scripts/modal-drag-test.mjs",
+    "test:tbxdbl": "node scripts/textbox-tool-dblclick-test.mjs",
     "test:markup": "node scripts/markup-test.mjs",
     "test:textbox": "node scripts/textbox-resize-test.mjs",
     "test:wheel": "node scripts/ctrl-wheel-zoom-test.mjs",
@@ -52,7 +55,11 @@
     "test:launch": "node scripts/launch-test.mjs",
     "test:audit": "node scripts/audit-imports.mjs",
     "test:icon": "node scripts/icon-pack-test.mjs",
-    "dist": "electron-builder --win --x64"
+    "dist": "electron-builder --win --x64",
+    "test:pdf2word": "node scripts/pdf2word-test.mjs",
+    "test:asar": "node scripts/asar-check.mjs",
+    "test:models": "node scripts/models-fetch-test.mjs",
+    "test:redesign-shot": "node scripts/redesign-shot.mjs"
   },
   "build": {
     "appId": "com.aipdf.editor",
@@ -93,6 +100,7 @@
     },
     "directories": {
       "output": "dist-build"
-    }
+    },
+    "afterPack": "scripts/after-pack.cjs"
   }
 }

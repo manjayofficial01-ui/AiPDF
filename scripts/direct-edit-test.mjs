@@ -30,6 +30,8 @@
  *   node scripts/direct-edit-test.mjs
  */
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -37,10 +39,14 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9547;
+// A per-run profile: the default one is held by any installed copy the user has
+// open, and Electron's single-instance lock then keeps this instance from
+// starting at all ("no renderer target").
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-direct-ud-'));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
+const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 

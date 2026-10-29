@@ -3,6 +3,7 @@ import {
   newDocShell, pushHistory, undo, redo, canUndo, canRedo, addRecent, updateAnnot,
   removeAnnots, annotById, markDirty, setClean, addAnnot, reorderAnnots,
   canUndoStructure, canRedoStructure,
+  DEFAULT_SETTINGS, applySettingsToState,
 } from './store.js';
 import * as V from './viewer.js';
 import { loadDocLayers, layerVisible } from './layers.js';
@@ -13,7 +14,7 @@ import { indexDocumentFonts, resetDocumentFonts, resolveFontFor } from './fontre
 import { buildPdf, buildBlank, buildFromImages, buildExtract, buildMerge, readMetadata, probeEncryption, drainFontSubstitutions, buildNup, buildSingleStrip, buildPoster, buildBooklet, buildRepaired } from './pdfwrite.js';
 import { initSidebar, renderSidebar, setSidebar, renderSidebarChrome } from './sidebar.js';
 import { initTools, selectAnnot, transformAnnot, clearFormat } from './tools.js';
-import { initTextEditing, replaceAllInDocument, commitBlockEdit, editableBlocks, editableSource, applyDirectFormat, directEditorOpen, directEditorState, openDirectEditor, openEditorForEdit, recognizePageForEditing, mergeBlocksIntoParagraph, threadEditFrames, previewEditLayout, toggleRegionMode, clearEditRegion } from './textedit.js';
+import { initTextEditing, replaceAllInDocument, commitBlockEdit, editableBlocks, editableSource, applyDirectFormat, directEditorOpen, directEditorState, openDirectEditor, openEditorForEdit, openInlineTextbox, recognizePageForEditing, mergeBlocksIntoParagraph, threadEditFrames, previewEditLayout, toggleRegionMode, clearEditRegion } from './textedit.js';
 import { runSearch, nextMatch, prevMatch, clearHighlights } from './search.js';
 import { loadFormFields, renderFormFields, startFieldPlacement, exportFormData, importFormData, resetForm } from './forms.js';
 import { watermarkDialog, headerFooterDialog, batesDialog, signatureDialog } from './stamps.js';
@@ -35,14 +36,23 @@ import {
   repairCheck, PAGE_NUMBER_FORMATS, pageNumberPlan, autoRotatePlan,
   attachmentOps, unlockFormsPlan, PIPELINE_STEPS, validatePipeline, runPipelineModel,
 } from './stirling.js';
+import { zipStore } from './zip.js';
+import { convertPdfToWord, docxSelfTest } from './pdf2word.js';
 import { $, el, toast, formatBytes, hexToRgb, rgbToHex, rgbToCss, clamp, initTooltips, uid } from './util.js';
 import { svgIcon } from './icons.js';
 import { showModal, confirmDialog, alertDialog, promptDialog, formRow, contextMenu } from './dialog.js';
+import { openSettingsDialog } from './settings.js';
 
 // Ribbon tabs, in Foxit's order: Home, View, Comment, Edit, Organize,
 // Protect, Convert, Forms — with AI as our own final tab. (View and Convert
 // used to be missing, so zoom/layout and the export tools had no home.)
-const MODES = ['Home', 'View', 'Comment', 'Edit', 'Organize', 'Protect', 'Convert', 'Forms', 'AI'];
+//
+// "Documents" sits between Protect and Convert so the tab strip mirrors the
+// native menu bar exactly. It exists because twenty real workflows — compare,
+// overlay, compress, flatten, N-up, booklet, poster, page numbers, split by
+// size, auto-rename, repair, attachments — were reachable ONLY from the
+// Windows menu bar. A feature you cannot see is a feature nobody uses.
+const MODES = ['Home', 'View', 'Comment', 'Edit', 'Organize', 'Protect', 'Documents', 'Convert', 'Forms', 'AI'];
 let mode = 'Home';
 let bootInfo = null;
 
@@ -58,6 +68,8 @@ async function boot() {
   await loadStoredUserFonts();
 
   applyTheme();
+  // Land on the ribbon tab the user left off on, before the chrome is built.
+  restoreRibbonTab();
   // Window chrome metrics come from main so the CSS reserves exactly the right
   // space for the Windows caption buttons instead of a hardcoded 138px.
   if (bootInfo && bootInfo.chrome) {
@@ -227,6 +239,14 @@ async function boot() {
   window.__aipdfAgentSelfTest = () => {
     try { return agentSelfTest(); } catch (e) { return { passed: false, errors: [String(e && e.stack ? e.stack : e)] }; }
   };
+
+  // Headless PDF→Word self-test (scripts/pdf2word-test.mjs): exercises the
+  // HTML→OOXML writer end to end without a model call or a save dialog.
+  window.__aipdfDocxSelfTest = () => {
+    try { return docxSelfTest(); } catch (e) { return { ok: false, error: String(e && e.stack ? e.stack : e) }; }
+  };
+  // Real end-to-end run, still model-free: the test stubs window.api.aiChat.
+  window.__aipdfConvertToWord = (opts) => convertPdfToWord(opts || {});
 
   // Headless edit→save→reopen cycle test (main.js --edit-test). Adds a
   // rectangle annotation, builds the PDF, writes it, reopens it, and
@@ -979,7 +999,14 @@ function buildChrome() {
   $('#btnPalette').onclick = () => commandPalette();
   $('#btnRibbonToggle').onclick = () => toggleRibbon();
   $('#btnChromeToggle').onclick = () => toggleChrome();
+  const qc = $('#btnQuickCustomize');
+  if (qc) {
+    qc.innerHTML = svgIcon('pin', 15);
+    qc.onclick = () => openQuickAccessCustomizer();
+  }
   applyChromeVisibility();
+  applyChrome();
+  renderQuickAccess();
   $('#ctxClose').onclick = () => { state.ai.dockOpen = false; $('#context').classList.add('hidden'); };
   $('#aiChip').onclick = () => configureAI();
 
@@ -1027,6 +1054,9 @@ function renderModeTabs() {
       // with no way to switch tools.
       if (state.view.ribbonMode === 'collapsed') setRibbonMode('expanded');
       mode = m;
+      // Remember the tab so the next launch lands where the work left off.
+      settings.lastRibbonTab = m;
+      saveSettings();
       renderModeTabs();
       renderRibbon();
     };
@@ -1076,6 +1106,28 @@ function applyChromeVisibility() {
   }
 }
 
+/** Apply the chrome-level preferences that are expressed as body classes:
+ *  the interface density and the ribbon labelling mode. Called whenever one
+ *  of those settings changes, and once at boot. */
+function applyChrome() {
+  const compact = (settings.density || 'comfortable') === 'compact';
+  document.body.classList.toggle('density-compact', compact);
+  document.body.classList.toggle('density-comfortable', !compact);
+  // Only repaint the ribbon if there is one — at boot it is still empty and
+  // the caller renders it anyway.
+  const rib = $('#ribbon');
+  if (rib && rib.children.length) renderRibbon();
+}
+
+/** Restore the ribbon tab the user was last working on. Settings can name a
+ *  tab that no longer exists (an older build, a renamed tab), so the value
+ *  is validated against the live list before it is trusted. */
+function restoreRibbonTab() {
+  if (!settings.restoreRibbonTab) return;
+  const saved = settings.lastRibbonTab;
+  if (saved && MODES.includes(saved)) mode = saved;
+}
+
 /* ── Ribbon definitions ─────────────────────────────────────────────────── */
 
 const TOOLS = [
@@ -1121,11 +1173,55 @@ function toolName(id) {
   return t ? t[1] : String(id || 'select').replace(/^\w/, (c) => c.toUpperCase());
 }
 
-function toolButtons(keys) {
+/**
+ * Keyboard shortcut for a tool id, shown as a chip on the ribbon button and
+ * in the command palette. This is a MIRROR of the renderer keymap below and
+ * of the native menu accelerators — one table, so the ribbon can never
+ * advertise a shortcut the keyboard does not honour.
+ */
+const TOOL_KEYS = {
+  hand: 'Space', select: 'V', highlight: 'H', underline: 'U', strikeout: 'S',
+  squiggly: 'Q', note: 'N', callout: 'C', textbox: 'T', rect: 'R',
+  ellipse: 'O', line: 'L', arrow: 'A', ink: 'P', eraser: 'E', stamp: 'K',
+  image: 'I', redact: 'X', measure: 'M', editText: 'Ctrl+E',
+  whiteout: 'Ctrl+Shift+X', signature: 'Ctrl+Shift+G',
+};
+
+/** How the ribbon draws its buttons right now.
+ *  'auto'   — only groups authored as `style: 'large'` get a text label.
+ *  'always' — every button is labelled.
+ *  'never'  — the original icon-only ribbon.
+ *  Stored in settings.ribbonLabels and applied by applyChrome(). */
+function ribbonLabelMode() {
+  const m = settings.ribbonLabels || 'auto';
+  return m === 'always' || m === 'never' ? m : 'auto';
+}
+
+/** Should this ribbon group be drawn as large, labelled buttons? */
+function groupIsLarge(group) {
+  const m = ribbonLabelMode();
+  if (m === 'always') return true;
+  if (m === 'never') return false;
+  return group.style === 'large';
+}
+
+/** The tools a user is allowed to pin to the quick-access toolbar. Order is
+ *  the order they appear in the customiser, grouped by job. */
+const PINNABLE_TOOLS = [
+  'hand', 'select', 'editText', 'editImage',
+  'highlight', 'note', 'callout', 'textbox', 'underline', 'strikeout', 'squiggly',
+  'rect', 'ellipse', 'line', 'arrow', 'ink', 'brush', 'highlighter', 'whiteout', 'eraser',
+  'stamp', 'image', 'signature', 'redact',
+  'measure', 'areaHighlight', 'caret', 'link', 'formatPainter', 'eyedropper',
+];
+
+function toolButtons(keys, opts = {}) {
   return keys.map((k) => {
-    const [, label, icon] = TOOLS.find((t) => t[0] === k);
+    const [, label, icon] = TOOLS.find((t) => t[0] === k) || [k, k, 'info'];
     return {
       icon, label, kind: 'tool', value: k,
+      large: !!opts.large,
+      key: TOOL_KEYS[k] || '',
       active: () => state.tool === k,
       act: () => setTool(k),
     };
@@ -1159,20 +1255,22 @@ function ribbonGroupsForMode() {
     // tools, plus the most-used comment & markup, drawing and stamp tools — the
     // things you reach for on nearly every page.
     case 'Home': return [
-      { title: 'File', items: [
-        { icon: 'open', label: 'Open', act: () => onMenuAction('file:open') },
-        { icon: 'save', label: 'Save', act: () => onMenuAction('file:save') },
-        { icon: 'print', label: 'Print', act: () => onMenuAction('file:print') },
-        { icon: 'info', label: 'Props', act: () => onMenuAction('file:properties') },
-      ] },
-      // Select used to be buried in the Comment ribbon with a "preview" icon;
-      // Foxit keeps Select + Edit text on Home, so both live here.
-      { title: 'Tools', items: [
+      // The Home tab used to open with a "File" group (Open / Save / Print /
+      // Props) that simply repeated the quick-access bar sitting 20px above
+      // it. Acrobat and Foxit never repeat the global bar inside the ribbon —
+      // they spend that width on the tools instead — so the File group is
+      // gone and the space goes to labelled primary tools. Document properties
+      // keep a home in the "Document" group at the end.
+      { title: 'Tools', style: 'large', items: [
         // Foxit leads every tab with Hand then Select; Hand pans, Select picks.
-        ...toolButtons(['hand', 'select', 'editText', 'editArea', 'editImage']),
+        ...toolButtons(['hand', 'select', 'editText', 'editArea', 'editImage'], { large: true }),
         { icon: 'link', label: 'Add link', act: () => setTool('link') },
       ] },
-      { title: 'Comment & Markup', items: toolButtons(['highlight', 'underline', 'strikeout', 'squiggly', 'note', 'callout', 'textbox', 'areaHighlight']) },
+      // The four tools people reach for on nearly every page get a text label
+      // and a shortcut chip; the rest of the markup set stays icon-only in a
+      // dense group so the tab still fits without horizontal scrolling.
+      { title: 'Annotate', style: 'large', items: toolButtons(['highlight', 'note', 'callout', 'textbox'], { large: true }) },
+      { title: 'Markup', items: toolButtons(['underline', 'strikeout', 'squiggly', 'areaHighlight']) },
       { title: 'Drawing', items: toolButtons(['rect', 'roundRect', 'ellipse', 'line', 'arrow', 'polygon', 'polyline', 'cloud', 'ink', 'brush', 'highlighter', 'whiteout', 'redact', 'eraser']) },
       { title: 'Stamp & sign', items: toolButtons(['stamp', 'image', 'signature']) },
     ];
@@ -1215,6 +1313,9 @@ function ribbonGroupsForMode() {
     // Convert is a first-class Foxit tab (To Office / To Other). We expose the
     // export targets we actually implement, matching that category.
     case 'Convert': return [
+      { title: 'To Office', items: [
+        { icon: 'word', label: 'Word (AI)…', act: () => onMenuAction('convert:toWord') },
+      ] },
       { title: 'To file', items: [
         { icon: 'html', label: 'HTML…', act: () => onMenuAction('convert:toHtml') },
         { icon: 'rtf', label: 'RTF…', act: () => onMenuAction('convert:toRtf') },
@@ -1322,6 +1423,45 @@ function ribbonGroupsForMode() {
         { icon: 'key', label: 'Remove security', act: () => removeSecurity() },
       ] },
     ];
+    // Documents — the megaverb that was missing. Every one of these twenty
+    // workflows used to live ONLY behind the Windows menu bar, so they had
+    // no ribbon, no mode tab and no palette entry: Compare, Overlay, Compress,
+    // Flatten, Scale, Colours, N-up, Join, Poster, Booklet, Page numbers,
+    // Remove blanks, Remove annotations, Split by size, Auto-rename, Repair,
+    // Attachments, Information and the Automate pipeline.
+    case 'Documents': return [
+      { title: 'Compare & combine', items: [
+        { icon: 'compare', label: 'Compare…', act: () => onMenuAction('docs:compare') },
+        { icon: 'layers', label: 'Overlay…', act: () => onMenuAction('docs:overlay') },
+      ] },
+      { title: 'Optimise', items: [
+        { icon: 'compress', label: 'Compress…', act: () => onMenuAction('docs:compress') },
+        { icon: 'flatten', label: 'Flatten…', act: () => onMenuAction('docs:flatten') },
+        { icon: 'resize', label: 'Scale…', act: () => onMenuAction('docs:scale') },
+        { icon: 'palette', label: 'Colours…', act: () => onMenuAction('docs:adjustColors') },
+      ] },
+      { title: 'Page layout', items: [
+        { icon: 'grid', label: 'N-up…', act: () => onMenuAction('docs:nup') },
+        { icon: 'pages', label: 'Join…', act: () => onMenuAction('docs:singlePage') },
+        { icon: 'present', label: 'Poster…', act: () => onMenuAction('docs:poster') },
+        { icon: 'book', label: 'Booklet…', act: () => onMenuAction('docs:booklet') },
+        { icon: 'table', label: 'Page numbers…', act: () => onMenuAction('docs:pageNumbers') },
+      ] },
+      { title: 'Clean up', items: [
+        { icon: 'eraser', label: 'Remove blanks…', act: () => onMenuAction('docs:removeBlanks') },
+        { icon: 'eraser', label: 'Remove annotations…', act: () => onMenuAction('docs:removeAnnots') },
+        { icon: 'split', label: 'Split by size…', act: () => onMenuAction('docs:splitSize') },
+      ] },
+      { title: 'Document', items: [
+        { icon: 'editText', label: 'Auto-rename…', act: () => onMenuAction('docs:autoRename') },
+        { icon: 'check', label: 'Repair…', act: () => onMenuAction('docs:repair') },
+        { icon: 'attach', label: 'Attachments…', act: () => onMenuAction('docs:attachments') },
+        { icon: 'info', label: 'Information…', act: () => onMenuAction('docs:info') },
+      ] },
+      { title: 'Automate', items: [
+        { icon: 'wand', label: 'Pipeline…', act: () => onMenuAction('docs:automate') },
+      ] },
+    ];
     case 'AI': return [
       { title: 'Assistant', items: [
         { icon: 'ai', label: 'Ask', act: () => openAIDock() },
@@ -1340,29 +1480,278 @@ function ribbonGroupsForMode() {
   }
 }
 
+/* ── Double-clicking the Text box tool ────────────────────────────────────
+ *
+ * The ribbon re-renders on every click (setTool → renderRibbon), so the button
+ * that takes the first click is gone before the second lands — a `dblclick`
+ * on the button itself would never fire. The gesture is read at the ribbon
+ * level instead, on pointerdown, by time + position. The selection is captured
+ * on the FIRST press, before the click's setTool clears it.
+ */
+
+/** The selected text box / callout, or a selected Direct Editor edit. */
+function selectedTextTarget() {
+  const doc = activeDoc();
+  if (!doc) return null;
+  const a = state.selection
+    .map((id) => (doc.annots || []).find((x) => x.id === id))
+    .find((x) => x && (x.type === 'textbox' || x.type === 'callout'));
+  if (a) return { kind: 'annot', id: a.id };
+  const e = (doc.textEdits || []).find((x) => state.selection.includes(x.id));
+  if (e) return { kind: 'edit', id: e.id, page: e.page };
+  return null;
+}
+
+/** Double-click on the Text box tool: reopen the selected box for typing, or
+ *  arm a writing cursor so the next page click starts a box. */
+function doubleClickTextboxTool(target) {
+  if (target && target.kind === 'annot') {
+    setTool('textbox');
+    openInlineTextbox(target.id);
+    return;
+  }
+  if (target && target.kind === 'edit') {
+    setTool('editText');
+    void openEditorForEdit(target.page, target.id);
+    return;
+  }
+  setTool('textbox', { textWrite: true });
+  toast('Click on the page to start writing.', 'info', 2500);
+}
+
+let tbDownAt = 0, tbDownX = 0, tbDownY = 0, tbTarget = null;
+function onRibbonPointerDown(e) {
+  const btn = e.target.closest && e.target.closest('.rbtn');
+  if (!btn) return;
+  const label = (btn.getAttribute('aria-label') || btn.title || '').trim();
+  if (!/^text box$/i.test(label)) return;
+  const now = performance.now();
+  const isDouble = now - tbDownAt < 450
+    && Math.abs(e.clientX - tbDownX) < 6
+    && Math.abs(e.clientY - tbDownY) < 6;
+  if (!isDouble) {
+    tbTarget = selectedTextTarget();       // before the click clears the selection
+    tbDownAt = now; tbDownX = e.clientX; tbDownY = e.clientY;
+    return;
+  }
+  tbDownAt = 0;                            // a third click starts a fresh pair
+  doubleClickTextboxTool(tbTarget);
+}
+
+let ribbonDblWired = false;
+
 function renderRibbon() {
   const host = $('#ribbon');
+  // One listener for the life of the ribbon: the buttons inside are replaced
+  // on every render, so the handler has to live on the stable container.
+  if (!ribbonDblWired) { host.addEventListener('pointerdown', onRibbonPointerDown); ribbonDblWired = true; }
   host.innerHTML = '';
   for (const g of ribbonGroups()) {
+    // A "large" group stacks a 20px icon over a text label and a shortcut
+    // chip, so the primary tools can be read without a mouse-over. The rest
+    // stay icon-only and keep the tab narrow.
+    const large = groupIsLarge(g);
     const box = el('div', { class: 'rgroup' });
     box.appendChild(el('div', { class: 'rtitle', text: g.title }));
     const row = el('div', { class: 'rrow' });
     for (const item of g.items) {
       if (item.custom) { row.appendChild(item.custom()); continue; }
-      // Icon-only: the `title` attribute stays as the tooltip so the meaning
-      // is preserved without writing the name on the face of the toolbar.
+      const key = item.key || '';
+      // `title` MUST stay the bare label — several UI tests match on it
+      // exactly — so the richer tooltip (label + shortcut) goes in `data-tip`
+      // and the shared tooltip helper retires the native one on first hover.
       const b = el('button', {
-        class: `rbtn${item.active && item.active() ? ' active' : ''}`,
+        class: `rbtn${large ? ' large' : ''}${item.active && item.active() ? ' active' : ''}`,
         title: item.label,
         'aria-label': item.label,
-        html: svgIcon(item.icon, 17),
+        'aria-keyshortcuts': key || null,
+        html: svgIcon(item.icon, large ? 20 : 17),
       });
+      if (key) b.setAttribute('data-tip', `${item.label}  ·  ${key}`);
+      if (item.kind === 'tool') b.dataset.tool = item.value;
+      if (large) {
+        b.appendChild(el('span', { class: 'rlabel', text: item.label }));
+        if (key) b.appendChild(el('span', { class: 'rkey', text: key }));
+      }
       b.onclick = item.act;
+      b.oncontextmenu = (e) => { e.preventDefault(); showRibbonContextMenu(e, item); };
       row.appendChild(b);
     }
     box.appendChild(row);
     host.appendChild(box);
   }
+  updateRibbonOverflow();
+}
+
+/** Right-click a ribbon button: pin the tool to the quick-access toolbar, or
+ *  unpin it. Acrobat and Foxit both make this the fast route to promoting a
+ *  tool you use every day — far quicker than hunting for a customise dialog. */
+function showRibbonContextMenu(e, item) {
+  const toolId = item.kind === 'tool' ? item.value : null;
+  if (!toolId) return;
+  const pinned = (settings.pinnedTools || []).includes(toolId);
+  contextMenu(e.clientX, e.clientY, [{
+    icon: 'pin',
+    label: pinned ? 'Unpin from quick access' : 'Pin to quick access',
+    onSelect: () => {
+      const list = (settings.pinnedTools || []).slice();
+      settings.pinnedTools = list.includes(toolId) ? list.filter((t) => t !== toolId) : list.concat([toolId]);
+      saveSettings();
+      renderQuickAccess();
+    },
+  }]);
+}
+
+/** When the ribbon is wider than the window, offer an overflow menu so that
+ *  nothing becomes unreachable behind the horizontal scroll. */
+function updateRibbonOverflow() {
+  const rib = $('#ribbon');
+  if (!rib) return;
+  const overflowing = rib.scrollWidth > rib.clientWidth + 4;
+  // The right-edge fade is only meaningful when there is something to scroll
+  // toward. Left always on, it faded the last group's own title as soon as
+  // the ribbon got shorter than the window.
+  rib.classList.toggle('is-overflowing', overflowing);
+  const existing = $('#ribbonOverflow');
+  if (!overflowing) {
+    if (existing) existing.remove();
+    return;
+  }
+  if (existing) return;
+  const btn = el('button', {
+    class: 'ribbon-overflow',
+    id: 'ribbonOverflow',
+    type: 'button',
+    title: 'All commands on this tab',
+    'aria-label': 'All commands on this tab',
+    html: svgIcon('menu', 16),
+  });
+  btn.onclick = () => {
+    const r = btn.getBoundingClientRect();
+    const items = [];
+    for (const g of ribbonGroups()) {
+      if (items.length) items.push({ separator: true });
+      items.push({ label: g.title, disabled: true });
+      for (const it of g.items) {
+        if (it.custom) continue;
+        items.push({ icon: it.icon, label: it.label, onSelect: () => it.act() });
+      }
+    }
+    contextMenu(r.left, r.bottom + 4, items);
+  };
+  rib.appendChild(btn);
+}
+
+/* ── Quick access: user-pinned tools ─────────────────────────────────────── */
+
+/** The pinned-tool strip at the head of the quick-access bar. Pinned tools
+ *  render before Open / Save / Undo, exactly like the Acrobat and Foxit
+ *  quick-access toolbar, so the tools you use daily are one click away. */
+function renderQuickAccess() {
+  const host = $('#quickPinned');
+  if (!host) return;
+  host.innerHTML = '';
+  const pins = (Array.isArray(settings.pinnedTools) ? settings.pinnedTools : [])
+    .filter((id) => TOOLS.some((t) => t[0] === id));
+  const sep = $('#qSep');
+  if (sep) sep.hidden = pins.length === 0;
+  for (const id of pins) {
+    const [, label, icon] = TOOLS.find((t) => t[0] === id);
+    const b = el('button', {
+      class: `qbtn pinned${state.tool === id ? ' active' : ''}`,
+      type: 'button',
+      title: `${label}${TOOL_KEYS[id] ? ` (${TOOL_KEYS[id]})` : ''}`,
+      'aria-label': label,
+      html: svgIcon(icon, 16),
+    });
+    b.onclick = () => setTool(id);
+    b.oncontextmenu = (e) => {
+      e.preventDefault();
+      contextMenu(e.clientX, e.clientY, [{
+        icon: 'pin',
+        label: 'Unpin from quick access',
+        onSelect: () => {
+          settings.pinnedTools = (settings.pinnedTools || []).filter((t) => t !== id);
+          saveSettings();
+          renderQuickAccess();
+        },
+      }]);
+    };
+    host.appendChild(b);
+  }
+}
+
+/** The quick-access customiser: tick the tools that deserve a permanent
+ *  button and drag them into the order you want. */
+async function openQuickAccessCustomizer() {
+  const order = PINNABLE_TOOLS.filter((id) => (settings.pinnedTools || []).includes(id));
+  const list = el('div', { class: 'qa-list' });
+
+  const paint = () => {
+    list.innerHTML = '';
+    for (const id of PINNABLE_TOOLS) {
+      const [, label, icon] = TOOLS.find((t) => t[0] === id);
+      const on = order.includes(id);
+      const row = el('div', { class: `qa-row${on ? ' on' : ''}` });
+      const cb = el('input', { type: 'checkbox' });
+      cb.checked = on;
+      cb.onchange = () => {
+        if (cb.checked) order.push(id);
+        else order.splice(order.indexOf(id), 1);
+        paint();
+      };
+      row.appendChild(el('label', { class: 'qa-check' }, [
+        cb,
+        el('span', { class: 'qa-ico', html: svgIcon(icon, 15) }),
+        el('span', { class: 'qa-label', text: label }),
+        TOOL_KEYS[id] ? el('span', { class: 'qa-key', text: TOOL_KEYS[id] }) : null,
+      ]));
+      if (on) {
+        const up = el('button', {
+          class: 'qa-move', type: 'button', title: 'Move up',
+          'aria-label': `Move ${label} up`, html: svgIcon('chevronUp', 13),
+        });
+        up.onclick = () => {
+          const i = order.indexOf(id);
+          if (i > 0) { order.splice(i, 1); order.splice(i - 1, 0, id); paint(); }
+        };
+        const down = el('button', {
+          class: 'qa-move', type: 'button', title: 'Move down',
+          'aria-label': `Move ${label} down`, html: svgIcon('chevronDown', 13),
+        });
+        down.onclick = () => {
+          const i = order.indexOf(id);
+          if (i < order.length - 1) { order.splice(i, 1); order.splice(i + 1, 0, id); paint(); }
+        };
+        row.appendChild(up);
+        row.appendChild(down);
+      }
+      list.appendChild(row);
+    }
+  };
+  paint();
+
+  const body = el('div', { class: 'qa-custom' }, [
+    el('p', {
+      class: 'qa-hint',
+      text: 'Pinned tools sit at the head of the quick-access bar, ahead of Open, Save and Undo. '
+        + 'You can also right-click any ribbon tool to pin it straight away.',
+    }),
+    list,
+  ]);
+
+  const ok = await showModal({
+    title: 'Customize quick access',
+    body,
+    buttons: [
+      { label: 'Cancel', value: false, kind: 'ghost' },
+      { label: 'Done', value: true, kind: 'primary', default: true },
+    ],
+  });
+  if (!ok) return;
+  settings.pinnedTools = order.slice();
+  saveSettings();
+  renderQuickAccess();
 }
 
 /** True for the two annotations whose visible colour is the TYPE, not the
@@ -2904,78 +3293,8 @@ async function exportRtf() {
   toast(res.ok ? 'RTF exported' : 'Export failed: ' + res.error, res.ok ? 'ok' : 'err');
 }
 
-/** EPUB 2 is plain ZIP + XHTML, which every reader accepts. We deflate with
- *  stored entries (no compression) so the container stays trivially valid. */
-function zipStore(files) {
-  const enc = new TextEncoder();
-  const parts = [];
-  const central = [];
-  let offset = 0;
-  const crcTable = (() => {
-    const t = new Uint32Array(256);
-    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
-    return t;
-  })();
-  const crc32 = (bytes) => {
-    let c = 0xffffffff;
-    for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
-    return (c ^ 0xffffffff) >>> 0;
-  };
-  const u16 = (v) => [v & 0xff, (v >>> 8) & 0xff];
-  const u32 = (v) => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
-  for (const f of files) {
-    const nameBytes = enc.encode(f.name);
-    const data = enc.encode(f.data);
-    const crc = crc32(data);
-    // Local file header: 30 bytes, stored (uncompressed), no extra field.
-    const lh = [
-      0x50, 0x4b, 0x03, 0x04,       // signature
-      20, 0,                        // version needed to extract
-      0, 0,                         // general purpose flags
-      0, 0,                         // method 0 = stored
-      0, 0,                         // mod time
-      0x21, 0,                      // mod date 1980-01-01 (day 0 is invalid)
-      ...u32(crc),
-      ...u32(data.length),
-      ...u32(data.length),
-      ...u16(nameBytes.length),
-      0, 0,                         // extra field length
-    ];
-    parts.push(new Uint8Array(lh), nameBytes, data);
-    // Central directory header: 46 bytes.
-    const cd = [
-      0x50, 0x4b, 0x01, 0x02,       // signature
-      20, 0,                        // version made by
-      20, 0,                        // version needed
-      0, 0,                         // flags
-      0, 0,                         // method
-      0, 0,                         // mod time
-      0x21, 0,                      // mod date
-      ...u32(crc),
-      ...u32(data.length),
-      ...u32(data.length),
-      ...u16(nameBytes.length),
-      0, 0,                         // extra field length
-      0, 0,                         // comment length
-      0, 0,                         // disk number start
-      0, 0,                         // internal attributes
-      0, 0, 0, 0,                   // external attributes
-      ...u32(offset),               // offset of the local header
-    ];
-    central.push(new Uint8Array(cd), nameBytes);
-    offset += lh.length + nameBytes.length + data.length;
-  }
-  const cdStart = offset;
-  let cdSize = 0;
-  for (const c of central) { parts.push(c); cdSize += c.length; }
-  const end = new Uint8Array([0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, ...u16(files.length), ...u16(files.length), ...u32(cdSize), ...u32(cdStart), 0, 0]);
-  parts.push(end);
-  const total = parts.reduce((n, p) => n + p.length, 0);
-  const out = new Uint8Array(total);
-  let at = 0;
-  for (const p of parts) { out.set(p, at); at += p.length; }
-  return out;
-}
+/* zipStore lives in ./zip.js — the PDF→Word converter writes OOXML through the
+   same writer, and a second copy would be two things to keep in sync. */
 
 /** EPUB 2 container file list — pure so the ZIP can be validated headlessly. */
 function buildEpubFiles(doc, pages) {
@@ -3414,6 +3733,8 @@ function pasteAnnots() {
 function renderToolProps(host, panel) {
   panel.classList.remove('hidden');
   $('#ctxTitle').textContent = `${toolName(state.tool || 'select')} tool`;
+  const toolIcon = (TOOLS.find((t) => t[0] === (state.tool || 'select')) || [])[2] || 'info';
+  setContextScope(toolIcon, `${toolName(state.tool || 'select')} tool`, 'Defaults for new objects');
   host.innerHTML = '';
 
   // Foxit's Typewriter tool: the panel is text properties first (Font / Size /
@@ -3428,6 +3749,7 @@ function renderToolProps(host, panel) {
     // The session, not the tool, decides the title: a Direct Editor opened by
     // double-clicking from the Select tool is still a Direct Editor.
     $('#ctxTitle').textContent = 'Direct Editor';
+    setContextScope('editText', 'Direct Editor', 'Editing the text on the page');
     const live = directEditorOpen();
     // Seed from the block actually being edited. Reading the persisted house
     // style instead is what made these controls look dead: they displayed
@@ -3827,7 +4149,78 @@ function directOcrGroup() {
 }
 
 function renderContext() {
-  if (state.ai.dockOpen) { renderAIDock(); return; }
+  renderContextBody();
+  // Fold the sections AFTER the body is built: the panel is rebuilt from
+  // scratch on every selection change, so the fold state has to be re-applied
+  // each time rather than being baked into the markup.
+  foldPropSections($('#ctxBody'));
+}
+
+/** The scope strip above the properties: WHAT the controls below apply to.
+ *  Without it the panel silently changed meaning as the selection changed —
+ *  the same "Colour" row was the tool default, then the selected object's
+ *  colour, then the page. Naming the scope removes the guesswork. */
+function setContextScope(icon, name, sub) {
+  const host = $('#ctxScope');
+  if (!host) return;
+  if (!name) {
+    host.hidden = true;
+    host.style.display = 'none';
+    host.innerHTML = '';
+    return;
+  }
+  host.hidden = false;
+  host.style.display = 'flex';
+  host.innerHTML = '';
+  const text = el('div', { class: 'ctx-scope-text' }, [
+    el('div', { class: 'ctx-scope-name', text: name }),
+  ]);
+  if (sub) text.appendChild(el('div', { class: 'ctx-scope-sub', text: sub }));
+  host.appendChild(el('div', { class: 'ctx-scope-icon', html: svgIcon(icon || 'info', 15) }));
+  host.appendChild(text);
+}
+
+/** Make the properties sections collapsible. A long panel (the Direct Editor
+ *  alone carries Appearance, Story, Table and Composition) otherwise has to
+ *  be re-collapsed on every selection change, and the state is remembered per
+ *  section so it survives a restart. */
+function foldPropSections(host) {
+  if (!host) return;
+  const seen = new Map();
+  for (const g of Array.from(host.querySelectorAll('.prop-group'))) {
+    const title = g.querySelector(':scope > .prop-title');
+    if (!title || title.dataset.foldable === '1') continue;
+    title.dataset.foldable = '1';
+    const label = (title.textContent || '').trim() || 'Section';
+    const n = (seen.get(label) || 0) + 1;
+    seen.set(label, n);
+    const key = `prop:${label.toLowerCase()}:${n}`;
+    const body = el('div', { class: 'prop-body' });
+    while (title.nextSibling) body.appendChild(title.nextSibling);
+    g.appendChild(body);
+    g.classList.add('collapsible');
+    const collapsed = (settings.collapsedProps || []).includes(key);
+    g.classList.toggle('collapsed', collapsed);
+    title.setAttribute('role', 'button');
+    title.setAttribute('tabindex', '0');
+    title.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    title.appendChild(el('span', { class: 'caret', html: svgIcon('chevronUp', 13) }));
+    const toggle = () => {
+      const now = g.classList.toggle('collapsed');
+      title.setAttribute('aria-expanded', now ? 'false' : 'true');
+      const list = Array.isArray(settings.collapsedProps) ? settings.collapsedProps : [];
+      settings.collapsedProps = now ? list.concat([key]) : list.filter((k) => k !== key);
+      saveSettings();
+    };
+    title.onclick = toggle;
+    title.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    };
+  }
+}
+
+function renderContextBody() {
+  if (state.ai.dockOpen) { setContextScope(null, ''); renderAIDock(); return; }
   const host = $('#ctxBody');
   const panel = $('#context');
   const doc = activeDoc();
@@ -3858,6 +4251,7 @@ function renderContext() {
   if (sel.length > 1) {
     panel.classList.remove('hidden');
     $('#ctxTitle').textContent = `${sel.length} selected`;
+    setContextScope('layers', `${sel.length} objects selected`, 'Arrange or delete the selection');
     host.innerHTML = '';
     const del = el('button', { class: 'mini-btn', text: 'Delete selected', style: { background: 'var(--danger)', borderColor: 'var(--danger)', color: 'var(--accent-text)' } });
     del.onclick = () => { removeAnnots(sel.map((a) => a.id)); pushHistory('delete'); renderAllAnnotations(); renderSidebar(); emit('annots'); };
@@ -3870,6 +4264,7 @@ function renderContext() {
   $('#ctxTitle').textContent = 'Page';
   const i = doc.currentPage ?? 0;
   const dims = pageDims(i);
+  setContextScope('file', `Page ${i + 1}`, `${doc.numPages} pages · ${fmtSize(dims.w, dims.h)}`);
   host.innerHTML = '';
   const rows = [
     ['Page', `${i + 1} of ${doc.numPages}`],
@@ -3893,6 +4288,7 @@ function renderTextEditProps(e, host, panel, box = null) {
   // panel would make restyling it impossible.
   if (box) renderAnnotProps(box, host, panel);
   $('#ctxTitle').textContent = 'Text block';
+  setContextScope('editText', 'Text block', `Page ${(e.page ?? 0) + 1} of ${(activeDoc() || {}).numPages || '?'}`);
   const g1 = el('div', { class: 'prop-group' });
   g1.appendChild(el('div', { class: 'prop-title', text: 'Edited text' }));
   g1.appendChild(el('div', { class: 'hint', text: 'Drag the box anywhere on the page, or double-click it to type into it again. On save the original run is removed from the file and this text is written as ordinary page text.' }));
@@ -4017,6 +4413,10 @@ function renderAnnotProps(a, host, panel) {
   panel.classList.remove('hidden');
   const names = { highlight: 'Highlight', highlighter: 'Highlighter', brush: 'Brush', underline: 'Underline', strikeout: 'Strikethrough', squiggly: 'Squiggly', note: 'Sticky note', textbox: 'Text box', callout: 'Callout', rect: 'Rectangle', ellipse: 'Ellipse', line: 'Line', arrow: 'Arrow', ink: 'Ink', stamp: 'Stamp', image: 'Image', signature: 'Signature', redact: 'Redaction', whiteout: 'Whiteout', measure: 'Measurement' };
   $('#ctxTitle').textContent = names[a.type] || a.type;
+  const d = activeDoc();
+  setContextScope((TOOLS.find((t) => t[0] === a.type) || [])[2] || 'info',
+    names[a.type] || a.type,
+    d ? `Page ${(a.page ?? 0) + 1} of ${d.numPages}` : '');
   host.innerHTML = '';
 
   const g1 = el('div', { class: 'prop-group' });
@@ -4326,28 +4726,129 @@ const COMMANDS = [
   ['Export', 'Export comments…', 'comments', 'export:comments'],
 ];
 
+/** Every command the palette can run. The tools are derived from the TOOL
+ *  registry rather than listed a second time, so a tool is searchable the
+ *  moment it exists and the two lists can never drift apart. */
+function paletteCommands(includeTools) {
+  const out = COMMANDS.map((c) => ({ group: c[0], label: c[1], icon: c[2], action: c[3], key: '' }));
+  if (includeTools) {
+    for (const [id, label, icon] of TOOLS) {
+      out.push({ group: 'Tools', label, icon, action: `tool:${id}`, key: TOOL_KEYS[id] || '' });
+    }
+  }
+  return out;
+}
+
+/** Score a scattered-character match. Higher is better; 0 means no match. */
+function subsequenceScore(query, text) {
+  let ti = 0, score = 0, streak = 0;
+  for (const ch of query) {
+    const f = text.indexOf(ch, ti);
+    if (f < 0) return 0;
+    streak = f === ti ? streak + 1 : 0;
+    score += 12 - Math.min(10, f - ti) + streak * 6;
+    ti = f + 1;
+  }
+  return score;
+}
+
+/**
+ * Rank a palette entry against a query. 0 means "no match".
+ *
+ * The bands matter more than the numbers: a name that CONTAINS the query must
+ * always beat one that merely contains its letters scattered across a longer
+ * word. Scoring them in the same band is what let "Compare with another PDF"
+ * outrank "Sticky note" when you typed "note".
+ *
+ *   exact name            → strongest
+ *   name starts with it
+ *   name contains it
+ *   group name contains it
+ *   scattered characters in the name
+ *   scattered characters across name + group   → weakest
+ */
+function fuzzyScore(query, label, group) {
+  if (!query) return 1;
+  const l = String(label || '').toLowerCase();
+  const g = String(group || '').toLowerCase();
+  if (l === query) return 100000;
+  let i = l.indexOf(query);
+  if (i === 0) return 90000;
+  if (i > 0) return 70000 - i;
+  i = g.indexOf(query);
+  if (i >= 0) return 30000 - i;
+  const s = subsequenceScore(query, l);
+  if (s > 0) return 10000 + s;
+  const s2 = subsequenceScore(query, `${g} ${l}`);
+  return s2 > 0 ? 1000 + s2 : 0;
+}
+
 function commandPalette() {
   const root = document.getElementById('overlayRoot');
   const box = el('div', { class: 'palette' });
-  const input = el('input', { type: 'text', placeholder: 'Type a command…', spellcheck: 'false' });
+  const input = el('input', { type: 'text', placeholder: 'Type a command or a tool…', spellcheck: 'false' });
   const list = el('div', { class: 'plist' });
   box.append(input, list);
   root.appendChild(box);
   let idx = 0, items = [];
 
+  const rowFor = (c, isRecent) => {
+    const row = el('div', { class: `pitem${isRecent ? ' recent' : ''}`, html: svgIcon(c.icon, 15) });
+    row.appendChild(el('span', { class: 'plt', text: c.label }));
+    if (c.key) row.appendChild(el('span', { class: 'plk', text: c.key }));
+    row.onclick = () => { close(); onMenuAction(c.action); };
+    items.push(row);
+    return row;
+  };
+
   const draw = () => {
     const q = input.value.trim().toLowerCase();
-    const hits = COMMANDS.filter((c) => !q || c[1].toLowerCase().includes(q) || c[0].toLowerCase().includes(q));
     list.innerHTML = '';
     items = [];
-    let lastGroup = '';
-    hits.forEach(([group, label, icon, act]) => {
-      if (group !== lastGroup) { list.appendChild(el('div', { class: 'pgroup', text: group })); lastGroup = group; }
-      const row = el('div', { class: 'pitem', html: svgIcon(icon, 15) + `<span class="plt">${label}</span>` });
-      row.onclick = () => { close(); onMenuAction(act); };
-      list.appendChild(row);
-      items.push(row);
+
+    // Recently used leads: the fastest route back to what you just did.
+    if (!q) {
+      const recents = (settings.recentCommands || [])
+        .map((a) => COMMANDS.find((c) => c[3] === a))
+        .filter(Boolean)
+        .slice(0, 6);
+      if (recents.length) {
+        list.appendChild(el('div', { class: 'pgroup', text: 'Recent' }));
+        for (const c of recents) {
+          list.appendChild(rowFor({ group: 'Recent', label: c[1], icon: c[2], action: c[3], key: '' }, true));
+        }
+      }
+    }
+
+    // Grouped results. Tools join the list only while searching — with no
+    // query they would bury every command under 35 tools.
+    const byGroup = new Map();
+    for (const c of paletteCommands(!!q)) {
+      const s = fuzzyScore(q, c.label, c.group);
+      if (!s) continue;
+      if (!byGroup.has(c.group)) byGroup.set(c.group, []);
+      byGroup.get(c.group).push({ c, s });
+    }
+    // Order the groups by their strongest hit, so the entry the user meant
+    // sits at the top of the list instead of under a group header further
+    // down. With an empty query every score ties and the natural order holds.
+    const ordered = [...byGroup.entries()].sort((a, b) => {
+      const ab = Math.max(...a[1].map((r) => r.s));
+      const bb = Math.max(...b[1].map((r) => r.s));
+      return bb - ab;
     });
+    for (const [group, rows] of ordered) {
+      rows.sort((a, b) => b.s - a.s || a.c.label.localeCompare(b.c.label));
+      list.appendChild(el('div', { class: 'pgroup', text: group }));
+      for (const r of rows) list.appendChild(rowFor(r.c, false));
+    }
+
+    if (!items.length) {
+      list.appendChild(el('div', {
+        class: 'pempty',
+        text: q ? `Nothing matches “${input.value.trim()}”` : 'No commands available',
+      }));
+    }
     idx = 0;
     mark();
   };
@@ -4371,38 +4872,38 @@ function commandPalette() {
 
 /* ══ Preferences ════════════════════════════════════════════════════════ */
 
+/** Restore every preference to its default value. The Settings dialog owns
+ *  the confirmation; this hook only performs the reset and re-applies. */
+function resetAllSettings() {
+  const recents = settings.recents;
+  Object.assign(settings, JSON.parse(JSON.stringify(DEFAULT_SETTINGS)));
+  settings.recents = recents;
+  applySettingsToState();
+  saveSettings();
+  applyTheme();
+  applyChrome();
+  renderRibbon();
+  renderSidebar();
+  toast('All preferences restored to their defaults.', 'info');
+}
+
+/**
+ * The Settings dialog. It used to be a flat modal offering exactly three
+ * preferences (theme, author, default zoom) while DEFAULT_SETTINGS held
+ * around forty-five — so layout, ribbon mode, measurement unit, every
+ * markup default, the OCR engine and the whole AI configuration were
+ * reachable only as a side effect of clicking a ribbon button. The dialog is
+ * now tabbed and grouped the way a professional editor groups them.
+ */
 async function preferencesDialog() {
-  await showModal({
-    title: 'Preferences',
-    body: (b) => {
-      const theme = el('select', {}, [
-        el('option', { value: 'system', text: 'Match system' }),
-        el('option', { value: 'light', text: 'Light' }),
-        el('option', { value: 'dark', text: 'Dark' }),
-      ]);
-      theme.value = settings.theme || 'system';
-      const author = el('input', { type: 'text', value: settings.author || '' });
-      const zoom = el('select', {}, [
-        el('option', { value: 'fitWidth', text: 'Fit width' }),
-        el('option', { value: 'fitPage', text: 'Fit page' }),
-        el('option', { value: 'custom', text: '100%' }),
-      ]);
-      zoom.value = settings.defaultZoom || 'fitWidth';
-      b.appendChild(formRow('Theme', theme).row);
-      b.appendChild(formRow('Author name', author).row);
-      b.appendChild(formRow('Default zoom', zoom).row);
-      b.appendChild(el('div', { class: 'divider' }));
-      const ai = el('button', { class: 'mini-btn', text: 'Configure AI model…' });
-      ai.onclick = () => configureAI();
-      b.appendChild(formRow('AI assistant', ai).row);
-      b.appendChild(el('div', { class: 'divider' }));
-      const kb = el('div', { class: 'hint' });
-      kb.innerHTML = shortcutHelpHtml();
-      b.appendChild(kb);
-      theme.onchange = () => { settings.theme = theme.value; applyTheme(); saveSettings(); };
-      author.oninput = () => { settings.author = author.value; state.author = author.value; saveSettings(); };
-      zoom.onchange = () => { settings.defaultZoom = zoom.value; saveSettings(); };
-    },
+  await openSettingsDialog({
+    applyTheme: () => applyTheme(),
+    applyChrome: () => applyChrome(),
+    renderRibbon: () => renderRibbon(),
+    renderSidebar: () => renderSidebar(),
+    renderShortcuts: () => el('div', { class: 'hint', html: shortcutHelpHtml() }),
+    configureAI: () => configureAI(),
+    resetAll: () => resetAllSettings(),
   });
 }
 
@@ -4677,12 +5178,17 @@ function initContextMenus() {
   });
 }
 
-function setTool(t) {
+function setTool(t, opts = {}) {
   if (t === 'editTextTool') t = 'editText';
   const changed = state.tool !== t;
   if (state.tool === 'formatPainter' && t !== 'formatPainter') clearFormat();
   state.tool = t;
   settings.tool = t;
+  // Double-clicking the Text box tool arms a writing cursor (I-beam) so the
+  // next page click starts a box. Any other tool drops it; a plain click on
+  // Text box leaves it alone.
+  if (t !== 'textbox') state.textWriteMode = false;
+  else if (opts.textWrite) state.textWriteMode = true;
   // Switching tools abandons whatever object was selected. The properties panel
   // must describe the tool you are about to use, not an object you picked with
   // the previous tool — renderContext() gives a non-empty selection priority
@@ -4731,9 +5237,12 @@ function setTool(t) {
   // tools are actually select-text-on-the-page. Foxit uses the same I-beam
   // for its text markup tools.
   const textSelectionTool = ['highlight', 'underline', 'strikeout', 'squiggly'].includes(t);
+  // A text box in writing mode is a text tool, not a draw-a-rectangle tool:
+  // the I-beam is the whole point of double-clicking the button.
+  const writing = t === 'textbox' && !!state.textWriteMode;
   const cursor = t === 'hand' ? 'grab'
     : t === 'select' ? 'default'
-    : t === 'editText' || textSelectionTool ? 'text'
+    : t === 'editText' || textSelectionTool || writing ? 'text'
     : 'crosshair';
   $('#pages').style.cursor = cursor;
   renderRibbon();
@@ -4782,7 +5291,21 @@ async function toggleReadAloud() {
   await ttsToggle();
 }
 
+/** Remember that an action was used, so the command palette can offer it
+ *  first next time. This is the single funnel every command passes through —
+ *  native menu, ribbon and palette alike — so the recents list reflects what
+ *  the user actually does, not what they clicked in one surface. */
+function noteRecentCommand(action) {
+  if (!action || typeof action !== 'string') return;
+  if (!/^[a-z]+:[a-zA-Z]+$/.test(action)) return;
+  const list = (Array.isArray(settings.recentCommands) ? settings.recentCommands : [])
+    .filter((a) => a !== action);
+  settings.recentCommands = [action, ...list].slice(0, 10);
+  saveSettings();
+}
+
 async function onMenuAction(action, payload) {
+  noteRecentCommand(action);
   const doc = activeDoc();
   switch (action) {
     case 'file:open': {
@@ -4971,6 +5494,7 @@ async function onMenuAction(action, payload) {
     // bus, command palette and future menu entries reach the same tools.
     case 'tool:roundRect': case 'tool:polygon': case 'tool:polyline': case 'tool:cloud':
     case 'tool:areaHighlight':
+    case 'tool:caret': case 'tool:measureArea':
     case 'tool:link':
       setTool(action.slice(5));
       break;
@@ -5110,6 +5634,7 @@ async function onMenuAction(action, payload) {
 
     case 'convert:toText': await exportText(); break;
     case 'convert:toImages': await exportImages(); break;
+    case 'convert:toWord': await convertPdfToWord({ busy: setBusy }); break;
     case 'convert:toHtml': await exportHtml(); break;
     case 'convert:toRtf': await exportRtf(); break;
     case 'convert:toEpub': await exportEpub(); break;

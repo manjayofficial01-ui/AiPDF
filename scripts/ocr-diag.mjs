@@ -15,8 +15,20 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PACKAGED_EXE = path.join(ROOT, 'dist-build2', 'win-unpacked', 'AiPDF Editor.exe');
-const ELECTRON = fs.existsSync(PACKAGED_EXE) && process.env.AIPDF_TARGET === 'packaged'
+/** Newest packaged build (`dist-build`, `dist-build29`, …). */
+function packagedExe() {
+  const dirs = fs.readdirSync(ROOT)
+    .filter((n) => /^dist-build\d*$/.test(n))
+    .map((n) => ({ n, t: fs.statSync(path.join(ROOT, n)).mtimeMs }))
+    .sort((a, b) => b.t - a.t);
+  for (const d of dirs) {
+    const exe = path.join(ROOT, d.n, 'win-unpacked', 'AiPDF Editor.exe');
+    if (fs.existsSync(exe)) return exe;
+  }
+  return '';
+}
+const PACKAGED_EXE = packagedExe();
+const ELECTRON = PACKAGED_EXE && process.env.AIPDF_TARGET === 'packaged'
   ? PACKAGED_EXE
   : path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const EXTRA_ARGS = ELECTRON === PACKAGED_EXE ? [] : ['.'];

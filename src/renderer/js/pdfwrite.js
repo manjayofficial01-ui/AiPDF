@@ -2083,6 +2083,29 @@ export async function probeEncryption(bytes) {
   }
 }
 
+/**
+ * How many cryptographic signatures a file carries.
+ *
+ * Counting `/ByteRange` rather than `/FT /Sig` is the point: a signature
+ * *field* is an empty box waiting for someone to sign, and saving over one
+ * costs nothing. A `/ByteRange` is a signature that was actually applied, and
+ * its bytes cover the file up to the trailer — so rebuilding the document, in
+ * this app or any other, silently invalidates it. The save path asks about
+ * those before it writes.
+ */
+export async function countSignatures(bytes) {
+  try {
+    const d = await PDFDocument.load(bytes.slice(0), { updateMetadata: false, ignoreEncryption: true });
+    let n = 0;
+    for (const [, obj] of d.context.enumerateIndirectObjects()) {
+      if (obj instanceof PDFDict && obj.has(PDFName.of('ByteRange'))) n++;
+    }
+    return n;
+  } catch {
+    return 0;
+  }
+}
+
 export async function readMetadata(bytes) {
   const doc = await PDFDocument.load(bytes.slice(0), { updateMetadata: false });
   return {

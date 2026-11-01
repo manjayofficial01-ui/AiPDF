@@ -28,7 +28,7 @@ const INSTALLED = 'C:/Program Files/AiPDF Editor/resources/app.asar';
 
 function newestBuildAsar() {
   const dirs = fs.readdirSync(ROOT)
-    .filter((n) => /^dist-build\d+$/.test(n))
+    .filter((n) => /^dist-build\d*$/.test(n))
     .map((n) => ({ n, t: fs.statSync(path.join(ROOT, n)).mtimeMs }))
     .sort((a, b) => b.t - a.t);
   for (const d of dirs) {

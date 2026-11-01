@@ -1,7 +1,7 @@
 {
   "name": "aipdf-editor",
   "productName": "AiPDF Editor",
-  "version": "2.22.6",
+  "version": "2.24.0",
   "description": "AiPDF Editor — a modern Electron-based PDF viewer & editor with AI assistance, contract intelligence, smart redaction, multi-provider read-aloud and an agentic AI bot",
   "main": "src/main/main.js",
   "author": "manjayofficial01-ui",
@@ -12,10 +12,12 @@
     "@pdf-lib/fontkit": "^1.1.1",
     "pdfjs-dist": "^4.10.38",
     "regenerator-runtime": "^0.14.1",
-    "tesseract.js": "^5.1.1",
-    "tesseract.js-core": "^5.1.1"
+    "tesseract.js": "^7.0.0",
+    "tesseract.js-core": "^7.0.0"
   },
   "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
     "test:ocr": "node scripts/ocr-test.mjs",
     "test:ocr-server": "node scripts/ocr-server-test.mjs",
     "test:ocr-packaged": "node scripts/ocr-diag.mjs",
@@ -59,7 +61,11 @@
     "test:pdf2word": "node scripts/pdf2word-test.mjs",
     "test:asar": "node scripts/asar-check.mjs",
     "test:models": "node scripts/models-fetch-test.mjs",
-    "test:redesign-shot": "node scripts/redesign-shot.mjs"
+    "test:redesign-shot": "node scripts/redesign-shot.mjs",
+    "test:trust": "node scripts/safewrite-test.mjs && node scripts/redact-integrity-test.mjs",
+    "test:editplan": "node scripts/editplan-test.mjs",
+    "test:redact": "node scripts/redact-flow-test.mjs",
+    "test:siguard": "node scripts/signature-guard-test.mjs"
   },
   "build": {
     "appId": "com.aipdf.editor",
@@ -102,5 +108,9 @@
       "output": "dist-build"
     },
     "afterPack": "scripts/after-pack.cjs"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
   }
 }

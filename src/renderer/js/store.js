@@ -106,10 +106,22 @@ export const DEFAULT_SETTINGS = {
     availableModels: [],         // cached list from GET /models
   },
   ocr: {
-    engine: 'hybrid',            // tesseract (local) | ai (vision model) | hybrid (AI first, Tesseract fallback)
+    engine: 'tesseract',         // tesseract (local, default) | ai (vision model) | hybrid (AI first, Tesseract fallback)
     dpi: 150,                    // render resolution for AI vision OCR
     langHint: '',                // free-text hint passed to the vision model (e.g. "Nepali and English")
   },
+  // Trust. Saving rewrites the whole file, so the revision before this one is
+  // kept as `<name>.pdf.bak` and can be rolled back with File ▸ Restore
+  // Previous Version. One copy of the document you are editing, replaced each
+  // save — switch off if you do not want the extra file.
+  backupBeforeSave: true,
+  // Document text is sent to the configured AI endpoint only with consent.
+  // `ask` prompts the first time a run needs to leave the machine, `allow`
+  // remembers the approval, `deny` keeps the app offline-local.
+  aiEgress: 'ask',
+  // Verified AI editing: the agent proposes a plan and waits for approval
+  // instead of mutating the document as it thinks.
+  aiPlanFirst: true,
   recents: [],
 };
 
@@ -127,7 +139,18 @@ export async function loadSettings(boot) {
   settings.ai = { ...DEFAULT_SETTINGS.ai, ...(stored.ai || {}) };
   if (!Array.isArray(settings.ai.customHeaders)) settings.ai.customHeaders = [];
   if (!Array.isArray(settings.ai.availableModels)) settings.ai.availableModels = [];
-  settings.ocr = { ...DEFAULT_SETTINGS.ocr, ...(stored.ocr || {}) };
+  const storedOcr = stored.ocr && typeof stored.ocr === 'object' ? stored.ocr : {};
+  settings.ocr = { ...DEFAULT_SETTINGS.ocr, ...storedOcr };
+  // Older builds defaulted to hybrid (and briefly carried local-model engine
+  // ids). Move only those defaults to Tesseract; an explicit AI/Tesseract
+  // choice is preserved. The flag makes this one-time.
+  if (!storedOcr.defaultMigrated) {
+    if (!storedOcr.engine || storedOcr.engine === 'hybrid' || storedOcr.engine === 'xiaomi' || storedOcr.engine === 'paddle') {
+      settings.ocr.engine = 'tesseract';
+    }
+    settings.ocr.defaultMigrated = true;
+    saveSettings();
+  }
   const recents = Array.isArray(file.recents) ? file.recents : settings.recents;
   settings.recents = Array.isArray(recents) ? recents : [];
   // No `process` in the renderer main world — the old process.env.USERNAME

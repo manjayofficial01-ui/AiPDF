@@ -12,8 +12,9 @@
  *    better on low-quality scans, handwriting and complex layouts, and it
  *    uses the exact same provider stack as the assistant: base URL, API key,
  *    auth mode, custom headers and the model fetched from the provider.
- *  - "hybrid" (default) — AI when a provider is configured, Tesseract
- *    otherwise, with automatic fallback to Tesseract if the AI call fails.
+ *  - "hybrid" — AI when a provider is configured, Tesseract otherwise, with
+ *    automatic fallback to Tesseract if the AI call fails. Tesseract alone is
+ *    the default engine.
  *
  * Recognition output is stored on the open document as
  * doc.ocr[pageIndex] = { text, confidence, langs, engine, at } —
@@ -44,9 +45,9 @@ export const OCR_LANGS = [
 ];
 
 export const OCR_ENGINES = [
-  { id: 'hybrid', label: 'Hybrid — AI first, local fallback' },
+  { id: 'tesseract', label: 'Local Tesseract (offline, default)' },
   { id: 'ai', label: 'AI vision (Gemini / OpenAI-compatible)' },
-  { id: 'tesseract', label: 'Local Tesseract (offline)' },
+  { id: 'hybrid', label: 'Hybrid — AI first, local fallback' },
 ];
 
 /** Prompt for the vision models: plain-text transcription, layout-aware. */
@@ -176,7 +177,7 @@ export function isScanned(doc, i) {
  * the assistant is configured (base URL + key) and Tesseract otherwise.
  */
 export function resolveOcrEngine() {
-  const setting = (settings.ocr && settings.ocr.engine) || 'hybrid';
+  const setting = (settings.ocr && settings.ocr.engine) || 'tesseract';
   if (setting === 'tesseract') return { engine: 'tesseract', setting };
   let aiUsable = false;
   try { aiUsable = aiReady(); } catch { aiUsable = false; }
@@ -263,6 +264,12 @@ async function ocrPageAI(pageIndex, langs = 'eng', onProgress) {
   const { renderPageToCanvas } = await import('./viewer.js');
   const doc = activeDocRef();
   if (!doc) throw new Error('No document open');
+  // The page is about to be rendered and uploaded. One answer covers the run,
+  // because this is called once per page of a batch.
+  const { consentToEgress } = await import('./ai.js');
+  if (!(await consentToEgress({ images: 1, purpose: 'Reading this page as an image' }))) {
+    throw new Error('Sharing declined — the page was not sent to the vision model. Switch the engine to Local Tesseract to recognise it offline.');
+  }
   const dpi = clamp(Number(settings.ocr && settings.ocr.dpi) || 150, 72, 400);
   if (onProgress) onProgress({ status: 'rendering page', progress: 0.15 });
   const canvas = await renderPageToCanvas(pageIndex, dpi);

@@ -24,8 +24,10 @@ Mapped from the capabilities that define the category leaders:
 | **Edit** | **Direct Editor** — Acrobat‑style in‑place text editing with a full Format panel (font, size, colour, bold/italic/underline, align incl. justify, line & character spacing, horizontal scaling). The font dropdown lists the **fonts installed on your machine** (grouped under *Local fonts*) alongside the standard families — picking one registers it so it embeds on save. **Tables are recognised** (ruled *and* borderless) so an edit inside a table is scoped to its **cell**, not the whole row — and the same cell scoping now works on **recognised scans**: OCR lines are cut at table-rule glyphs ("|" read by Tesseract) and word gutters, the grid is rebuilt from the recurring boundaries (header bands that sit at wrapped-line pitch are absorbed), and each cell becomes an independent block. With an AI key, recognition goes further: the vision model returns the table as **explicit per-cell entries** (the structure-aware idea from a proven PDF→Word flow), so cells arrive pre-separated. The Direct Editor panel also offers **Select area**: drag a rectangle on the page and only the text inside it becomes editable — on scans, recognition runs for that region first. When the text is detected the editor **asks for the text first**, prefilled, before anything is replaced. On save the original run is **removed from the file** and the replacement is written as ordinary page text (see [Object-owned editing](#object-owned-editing--remove-dont-cover)); the block can be **dragged anywhere** on the page, merged into a paragraph, or threaded across frames and pages. **Edit Object** - pick an object already drawn on the page and move, resize, rotate, flip, fade, crop, replace or delete it. Objects are read from the file rather than guessed from pixels, so a page that looks flat still yields its separate objects - including a logo drawn inside a Form XObject, which is copied before it is edited so a form shared with other pages is left alone. A click picks the object painted on top; Alt+click steps down to the one underneath. A drag that encloses an object selects it whole, while a drag **inside** an image is **Area Direct Edit**: only the picture in the box is selected and white margins are trimmed off. *New layer* lifts that selection into its own real PDF layer with the white background removed, leaving a white fill in its place; *Keep area* crops the placement instead. A box over blank paper selects nothing. Plus redaction, headers/footers, watermarks, Bates numbering, page background. | Acrobat Pro / Nitro |
 | **Organize** | Insert/delete/rotate/extract/reorder pages, merge documents, split, insert blank pages or pages from another PDF. | PDFelement / Nitro |
 | **Forms** | Read & fill existing AcroForm fields, create new text/checkbox/radio/dropdown/signature fields, export values to JSON/CSV. | Acrobat / PDF‑XChange |
-| **Protect** | **AES‑256 encryption** (user/owner passwords), granular permissions (print/copy/modify/annotate/fill), manual redaction marks + apply/sanitize, and remove security. | Acrobat / Nitro |
-| **AI assistant** | Summarize, translate, proofread, rewrite selections, ask questions about the open document (or *all* open documents at once). Responses include navigable **`[p.N]` citations** that jump to and flash the referenced passage, plus **suggested follow‑up questions** under every answer. | Acrobat AI Assistant |
+| **Protect** | **AES‑256 encryption** (user/owner passwords), granular permissions (print/copy/modify/annotate/fill), manual redaction marks + apply/sanitize, and remove security. **Redaction is verified, not assumed**: the text under every mark is captured before anything changes, the bytes a save is about to write are reopened with pdf.js, and each marked string is searched for. A black box over live text fails that check and says so — with one click to convert those pages to images and re‑check. Applying redactions also stops writing the finding's description into the file's annotation comments, which used to leak the category (and the AI's reason) into a "sanitized" document. | Acrobat / Nitro |
+| **Save reliability** | A save never truncates your file and then fills it. The bytes land in a sibling temp file, are flushed to the device, and only then swap in with an atomic rename, so an interrupted save leaves the **previous document whole** instead of a short, unreadable file. The revision before this one is kept as `<name>.pdf.bak` (one copy, replaced each save; a setting if you do not want it) and **File ▸ Restore Previous Version…** swaps back — the swap is two‑phase, so restoring is itself undoable. A file that carries an **applied digital signature** is announced in the status bar and the save asks before rebuilding the bytes the signature covers, because a broken signature still renders: nothing looks wrong, every validator disagrees. | Acrobat / Word |
+| **AI assistant** | Summarize, translate, proofread, rewrite selections, ask questions about the open document (or *all* open documents at once). Responses include navigable **`[p.N]` citations** that jump to and flash the referenced passage, plus **suggested follow‑up questions** under every answer. Two trust rules: document text is fenced as `<document untrusted="true">` (a sentence inside your PDF that says "ignore your instructions" is data the model is told to report, not obey, and the fence tags are stripped from the payload so it cannot be escaped), and the **first upload of a session asks permission** — what is leaving, how much of it, and to which host. Settings ▸ *Files & trust* turns that into always‑ask, always‑allow, or never. | Acrobat AI Assistant |
+| **Verified AI editing** | The agent stops proposing and waits. Read‑only inspection → a typed edit plan → every operation resolved against the real document → **a preview card with the before/after text** → you approve → the deterministic writers apply it → the candidate file is rebuilt, reopened and searched to confirm each change. See [Verified AI editing](#verified-ai-editing--the-plan-comes-first). | blueprint‑grade, none shipped |
 | **AI Smart Redact** | One‑click scan of the current page or the whole document for sensitive data — emails, phones, SSNs/national IDs, credit cards (Luhn‑validated), IBANs, IPs, dates of birth, labelled ID numbers, street addresses and person names. A review checklist (all/none, per‑item) creates redaction marks over every located hit; "Mark + Apply & Sanitize" finishes the job in one step. Runs offline with pattern matching alone; with an AI key it also catches names, addresses and contextual data. | Foxit Smart Redact / Redactable |
 | **AI Contract Review** | Detects whether a document is an agreement, then reports parties, key terms (term, payment, renewal, termination, liability, governing law…), **risk flags** by severity (auto‑renewal, uncapped liability, unilateral clauses…), and "before you sign" action items — every finding cited with a clickable page jump. | Acrobat AI Contract Intelligence |
 | **AI Document Outline** | Builds a hierarchical outline of the document with page references; every entry jumps to its page. | UPDF mind map |
@@ -342,9 +344,13 @@ pages you ask about to the endpoint you configure; citations in the reply
 ## AI Agent mode (the AI edits the PDF for you)
 
 Toggle **Ask ⇄ Agent** at the bottom of the AI dock (or **AI ▸ AI Agent — Edit
-this PDF…**, `Ctrl+Shift+E`). In Agent mode the model stops merely answering and
+this PDF…**, `Ctrl+Alt+A`). In Agent mode the model stops merely answering and
 becomes a tool‑using bot that **reads, searches, OCRs and edits the open
-document directly**, planning and calling tools until the task is done:
+document directly**, planning and calling tools until the task is done. With
+Settings ▸ *Agent proposes an edit plan first* left on (the default) this entry
+point runs the [verified plan pipeline](#verified-ai-editing--the-plan-comes-first)
+instead, and **AI ▸ Verified Edit Plan…** (`Ctrl+Alt+E`) is the same pipeline
+started from a prompt.
 
 | Tool | What it does |
 | --- | --- |
@@ -371,15 +377,19 @@ protocols — Gemini native tool calling and OpenAI function calling.
 
 The OCR panel (sidebar ▸ OCR) picks an engine per run:
 
-- **Hybrid** (default) — AI vision when a provider is configured, local
-  Tesseract otherwise, with automatic fallback to Tesseract if the AI call
-  fails.
+- **Local Tesseract** (**default**) — fully offline (English, Hindi, Nepali,
+  mixed pairs), bundled with the application. No model download and no API key.
 - **AI vision** — the page is rendered at high DPI and transcribed by the
   configured vision model (Gemini or any OpenAI‑compatible provider). Best for
-  low‑quality scans, handwriting, tables and non‑Latin scripts. Uses the same
-  provider stack: base URL, API key, auth scheme, custom headers, fetched
-  model. An optional **language hint** (e.g. "Nepali + English") steers it.
-- **Local Tesseract** — fully offline (English, Hindi, Nepali, mixed pairs).
+  low‑quality scans, handwriting, Devanagari, tables and non‑Latin scripts.
+  Uses the same provider stack as the assistant: base URL, API key, auth
+  scheme, custom headers and the fetched model. An optional **language hint**
+  (e.g. "Nepali + English") steers it.
+- **Hybrid** — AI vision first when a provider is configured, with automatic
+  fallback to Tesseract if the AI call fails.
+
+No OCR model downloads are needed: AI OCR uses the provider configured in
+**AI settings**, and Tesseract ships inside the installer.
 
 Offline means offline: the Tesseract worker, its WASM core and the
 `eng`/`hin`/`nep`/`osd` language packs all ship inside the installer. The core
@@ -399,6 +409,38 @@ asset layouts without launching the app.
 
 Results land in the same store either way, so search, Ask‑AI citations and the
 Agent all work on scanned pages after OCR.
+
+---
+
+## Verified AI editing — the plan comes first
+
+`Ctrl+Alt+E` (**AI ▸ Verified Edit Plan…**), the *Edit for me* group on the AI
+ribbon, or the Agent box in the dock. This is a different contract from Agent
+mode, where the model calls a tool and the tool runs. Here the model may not
+edit at all until you have read what it intends to do:
+
+| Stage | What happens | What the code enforces |
+| --- | --- | --- |
+| 1. Understand | Your request is taken as the goal. | — |
+| 2. Inspect | The model gets **read‑only** tools: `list_pages`, `read_page`, `search_document`, `ocr_page`, `view_page`. | Any mutating tool is refused with *"not available while planning"* — the agent's own writer is not even reachable. |
+| 3. Plan | One terminal action, `propose_plan`, returns **typed operations** from a fixed set: replace text, highlight, note, text box, redact, rotate, delete pages, insert blank, metadata. | The model cannot invent an operation; anything outside the set is rejected as a row. |
+| 4. Preview & approve | Each operation is resolved against the document **before you see it**: the phrase is looked up in the real block model, the rectangle is located, the page range is parsed. | Rows that cannot be applied stay visible as `not found` / `rejected` with the reason, instead of disappearing — a silent omission would have you approve a plan that does less than it says. Deleting every page is refused. The count on the button is the *ready* count. Replace rows show word‑level **before → after** diff text. |
+| 5. Execute | Approved operations run through the same deterministic writers as the manual editor. | The model is out of the loop from here. Each operation carries an id so its result can be attributed to it. |
+| 6. Validate | The candidate file is built, reopened with pdf.js and searched: the new text must be present, the old text must be gone. Annotations are checked in the annotation layer. | Verdicts are PASS / FAIL / **NOT CHECKED** — if the file cannot be rebuilt, the operation is reported unverified rather than passed. A plain‑text audit record (request, provider, every operation, every verdict, including what was *not* approved) is kept on the document and copyable. Nothing is saved until you choose **Save as a new version**. |
+
+Prompt injection is treated as a document threat, because a PDF is
+attacker‑supplied text: document content, the user's own question and every tool
+result are wrapped in their own tags, and those tag names are stripped from the
+payload so a page cannot end its own block early and speak as the app. The
+system prompts say the same thing to the model: content inside the fences is
+data to report, not a command to obey.
+
+**Sharing is a decision, not a side effect.** The first AI call of a session
+that needs to read your document names the document, how much is going, and
+which host it is going to. Answer *Allow this session*, *Allow* (remembers) or
+*Cancel* — and Settings ▸ *Files & trust* can deny sharing outright, which
+leaves the offline features (Tesseract OCR, pattern Smart Redact, all editing)
+untouched.
 
 ---
 
@@ -484,6 +526,16 @@ npm start -- --agent-test            # agent tool registry, page-range parsing, 
 node scripts/launch-test.mjs         # the app actually OPENS: a visible window, rAF firing, renderer booted
 node scripts/ui-shot.mjs             # real screenshots of both themes into .smoke/
 
+# Trust layer (see "Verified AI editing" and "Save reliability"):
+npm run test:trust                   # node: crash-safe save — atomic swap, kept previous version, an interrupted
+                                     # save leaves the original whole and tidies up after itself (13 checks),
+                                     # and the redaction matching rule against files read back by pdf.js (8 checks)
+npm run test:redact                  # real app: the text under a mark is captured, a black box over live text
+                                     # FAILS the check, a sanitized page passes it (3 checks)
+npm run test:editplan                # real app with a scripted model: planning cannot mutate, unresolvable
+                                     # operations stay visible, nothing is written before approval, and each
+                                     # approved change is confirmed in the rebuilt file (19 checks)
+
 # OCR (offline engine):
 npm run test:ocr                     # real app: image-only page → Recognize → edit → saved file searchable (16 checks)
 npm run test:ocr-server              # node: every OCR asset resolves in the dev AND the packaged layout (17 checks)
@@ -522,5 +574,15 @@ window (via `scripts/win-visible.ps1`) and that `requestAnimationFrame` fires.
 
 - View, comment, edit, organize, forms, protect, and AI pipelines are
   implemented and verified end‑to‑end via the headless tests above.
+- The trust layer is measured rather than claimed: an interrupted save leaves
+  the previous file whole, a cover‑only redaction fails its own integrity check,
+  a plan cannot mutate anything before you approve it, and an approved change is
+  confirmed in the bytes that were written (`test:trust`, `test:redact`,
+  `test:editplan`).
+- Still open against the same checklist: tagged PDF / PDF‑UA output (no
+  `/StructTreeRoot`, no `/Lang`, no figure alt text is written today), a visual
+  page‑image diff alongside the text diff, batch operations across a folder of
+  files, and PDF→Excel. Cryptographic *signing* is out of scope — the app
+  protects existing signatures rather than creating them.
 - Known environment caveat: the WebGL/pdf.js GPU path is disabled by default on
   some VMs; software rendering is used and works correctly.

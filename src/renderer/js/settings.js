@@ -320,7 +320,7 @@ function buildOcr(W) {
   const g = group('OCR');
   g.appendChild(row('Engine',
     select(valSub('ocr', 'engine'), [
-      ['tesseract', 'Tesseract (local)'],
+      ['tesseract', 'Tesseract (local, default)'],
       ['ai', 'AI vision model'],
       ['hybrid', 'Hybrid (AI first)'],
     ], W.setSub('ocr', 'engine'))));
@@ -392,6 +392,25 @@ function buildAI(W) {
       ['doc', 'Current document'],
       ['alldocs', 'All open documents'],
     ], W.setSub('ai', 'defaultScope'))));
+  return g;
+}
+
+function buildTrust(W) {
+  const g = group('Files & trust');
+  g.appendChild(el('div', { class: 'set-hint', text: 'What a save does to your file, and what leaves your machine.' }));
+  g.appendChild(row('Keep the previous version on save',
+    toggle(val('backupBeforeSave'), 'Keep the previous version on save', W.set('backupBeforeSave')),
+    'A save rewrites the whole file, so the revision before it is kept as name.pdf.bak — one copy of the document you are editing, replaced each save. File ▸ Restore Previous Version… puts it back.'));
+  g.appendChild(row('Sending document text to the AI',
+    select(val('aiEgress'), [
+      ['ask', 'Ask before the first upload of a session'],
+      ['allow', 'Allow — every AI feature may send'],
+      ['deny', 'Deny — AI that reads the document stays off'],
+    ], W.set('aiEgress')),
+    'Summarise, Ask, Contract review, Smart Redact, vision OCR, PDF→Word and the Agent all upload the pages they work on. Nothing is sent without this being answered.'));
+  g.appendChild(row('Agent proposes an edit plan first',
+    toggle(val('aiPlanFirst'), 'Agent proposes an edit plan first', W.set('aiPlanFirst')),
+    'The agent shows what it intends to change — each operation with its before and after text — and waits for you to approve. Off means it edits as it works, undoable afterwards.'));
   return g;
 }
 
@@ -533,6 +552,7 @@ export async function openSettingsDialog(hooks = {}) {
     { id: 'presets', label: 'Colour presets', icon: 'palette', build: buildPresets },
     { id: 'ocr', label: 'OCR', icon: 'scan', build: buildOcr },
     { id: 'ai', label: 'AI assistant', icon: 'ai', build: buildAI },
+    { id: 'trust', label: 'Files & trust', icon: 'shield', build: buildTrust },
     { id: 'shortcuts', label: 'Shortcuts', icon: 'wand', build: buildShortcuts },
     { id: 'advanced', label: 'Advanced', icon: 'info', build: buildAdvanced },
   ];

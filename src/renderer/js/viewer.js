@@ -400,6 +400,33 @@ export async function getTextContent(i) {
   return tc;
 }
 
+/**
+ * The characters that sit inside a PDF-space rectangle, as a single string.
+ *
+ * Redaction needs this for two opposite reasons. Before the mark is applied it
+ * says *what is about to be destroyed*, so the save can be checked afterwards
+ * against the strings it claimed to remove. On a page that has no text layer at
+ * all it returns '' — and an empty answer there is meaningful too: the target
+ * is ink in an image, which a text-extraction check can never prove anything
+ * about, so the verification has to say so instead of passing silently.
+ */
+export async function textInRect(i, rect) {
+  const tc = await getTextContent(i);
+  if (!tc) return '';
+  const x0 = Math.min(rect[0], rect[2]), x1 = Math.max(rect[0], rect[2]);
+  const y0 = Math.min(rect[1], rect[3]), y1 = Math.max(rect[1], rect[3]);
+  const hits = [];
+  for (const it of tc.items) {
+    if (!it.str) continue;
+    const t = it.transform;
+    const size = Math.hypot(t[3], t[1]) || Math.hypot(t[2], t[0]) || 10;
+    const ix0 = t[4], iy0 = Math.min(t[5], t[5] - size), iy1 = Math.max(t[5], t[5] + size);
+    const ix1 = ix0 + (it.width || size * it.str.length * 0.5);
+    if (ix0 < x1 && ix1 > x0 && iy0 < y1 && iy1 > y0) hits.push(it.str);
+  }
+  return hits.join(' ').replace(/\s+/g, ' ').trim();
+}
+
 /** Full text of a page, with line breaks inferred from vertical jumps.
  *  Falls back to the OCR result when a page has no native text layer
  *  (scanned/flattened page that has been recognised). */

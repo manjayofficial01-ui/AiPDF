@@ -199,6 +199,7 @@ function buildMenu(send, opts = {}) {
         { label: 'Save', accelerator: 'CmdOrCtrl+S', click: () => send('file:save') },
         { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: () => send('file:saveAs') },
         { label: 'Save a Copy…', click: () => send('file:saveCopy') },
+        { label: 'Restore Previous Version…', click: () => send('file:restoreBackup') },
         { type: 'separator' },
         { label: 'Create from Images…', click: () => send('file:images') },
         {
@@ -452,6 +453,7 @@ function buildMenu(send, opts = {}) {
       label: '&AI',
       submenu: [
         { label: 'Ask AI  (Ctrl+J)', click: () => send('ai:ask') },
+        { label: 'Verified Edit Plan — propose, preview, approve…', accelerator: 'CmdOrCtrl+Alt+E', click: () => send('ai:planEdit') },
         { label: 'AI Agent — Edit this PDF…', accelerator: 'CmdOrCtrl+Alt+A', click: () => send('ai:agent') },
         { label: 'Summarize Document', accelerator: 'CmdOrCtrl+Shift+J', click: () => send('ai:summarize') },
         { label: 'Summarize All Documents', click: () => send('ai:summarizeAll') },

@@ -14,10 +14,13 @@ contextBridge.exposeInMainWorld('api', {
   messageBox: (opts) => ipcRenderer.invoke('dialog:message', opts),
 
   readFile: (filePath) => ipcRenderer.invoke('fs:read', filePath),
-  writeFile: (filePath, data) => ipcRenderer.invoke('fs:write', filePath, data),
+  writeFile: (filePath, data, opts) => ipcRenderer.invoke('fs:write', filePath, data, opts),
   /** Mark a drag & dropped file as openable/saveable (see fs:grantDrop). */
   grantDroppedFile: (filePath) => ipcRenderer.invoke('fs:grantDrop', filePath),
   fileExists: (filePath) => ipcRenderer.invoke('fs:exists', filePath),
+  /** Previous saved revision of a document, if a .bak of it exists. */
+  backupInfo: (filePath) => ipcRenderer.invoke('fs:backup-info', filePath),
+  restoreBackup: (filePath) => ipcRenderer.invoke('fs:restore-backup', filePath),
   deleteFontFile: (fileName) => ipcRenderer.invoke('font:delete', fileName),
   listSystemFonts: (refresh) => ipcRenderer.invoke('fonts:system', refresh),
 

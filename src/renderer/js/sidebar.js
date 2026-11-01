@@ -644,7 +644,7 @@ function renderOcrPanel() {
      or the hybrid of the two. Persisted in settings.ocr.engine. */
   const engineSel = el('select', { style: { width: 'auto', flex: '1', height: '26px' }, title: 'Which OCR engine to use' });
   OCR_ENGINES.forEach((e) => engineSel.appendChild(el('option', { value: e.id, text: e.label })));
-  engineSel.value = (settings.ocr && settings.ocr.engine) || 'hybrid';
+  engineSel.value = (settings.ocr && settings.ocr.engine) || 'tesseract';
   engineSel.onchange = () => {
     settings.ocr = settings.ocr || {};
     settings.ocr.engine = engineSel.value;
@@ -653,8 +653,10 @@ function renderOcrPanel() {
   };
 
   let engineHint = null;
+  let engineKind = (settings.ocr && settings.ocr.engine) || 'tesseract';
   try {
     const { engine } = resolveOcrEngine();
+    engineKind = engine;
     engineHint = engine === 'ai'
       ? `AI engine: ${settings.ai.model || 'vision model'}`
       : 'Local Tesseract — offline, no key needed';
@@ -722,7 +724,8 @@ function renderOcrPanel() {
       setProg('', 0);
     }
   };
-  tools.append(engineSel, langSel, runBtn, allBtn, aiSetupBtn, engineLabel, hintInput);
+  tools.append(engineSel, langSel, runBtn, allBtn, aiSetupBtn, engineLabel);
+  if (engineKind !== 'tesseract') tools.append(hintInput);
   body.appendChild(prog);
 
   const scannedCount = doc.scanned ? doc.scanned.size : null;
@@ -733,7 +736,7 @@ function renderOcrPanel() {
   }
 
   if (!results.length) {
-    body.appendChild(el('div', { class: 'empty-state', html: svgIcon('scan', 26) + '<div>No OCR results yet.<br/>Pick a language and run OCR on the current page — English, Hindi and Nepali/Devanagari are supported.</div>' }));
+    body.appendChild(el('div', { class: 'empty-state', html: svgIcon('scan', 26) + '<div>No OCR results yet.<br/>Pick an engine and run OCR on the current page — AI vision handles difficult scans; Tesseract covers English, Hindi and Nepali offline.</div>' }));
     return;
   }
 
@@ -751,9 +754,11 @@ function renderOcrPanel() {
     ta.oninput = () => { rec.text = ta.value; };
     const copy = el('button', { class: 'mini-btn', text: 'Copy' });
     copy.onclick = async () => { try { await navigator.clipboard.writeText(rec.text || ''); toast('Copied', 'ok', 1400); } catch { toast('Copy failed', 'err'); } };
+    const actions = [copy];
     const askBtn = el('button', { class: 'mini-btn', text: 'Ask AI' });
     askBtn.onclick = () => { openAIDock(); ask(`This page was recognised with OCR. Summarise it and list the key facts.`, 'page'); scrollToPage(p); };
-    const box = el('div', { class: 'ocr-result' }, [head, ta, el('div', { class: 'flex' }, [copy, askBtn])]);
+    actions.push(askBtn);
+    const box = el('div', { class: 'ocr-result' }, [head, ta, el('div', { class: 'flex' }, actions)]);
     head.onclick = () => scrollToPage(p);
     list.appendChild(box);
   }

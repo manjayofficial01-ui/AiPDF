@@ -23,7 +23,7 @@
  */
 
 import { activeDoc, settings } from './store.js';
-import { aiReady, configureAI, visionRequest, isGemini } from './ai.js';
+import { aiReady, configureAI, visionRequest, isGemini, markEgressGrantedForSession } from './ai.js';
 import { showModal, formRow } from './dialog.js';
 import { el, toast, escapeHtml } from './util.js';
 import { renderPageToCanvas } from './viewer.js';
@@ -459,6 +459,9 @@ async function askOptions(doc) {
     ],
   });
   if (!ok) return null;
+  // The dialog above is the consent step for this flow — it names the provider
+  // and the page range. Record it so the shared gate does not ask again.
+  markEgressGrantedForSession();
 
   const text = String(range.value || '').trim();
   // An empty box means "everything" — the placeholder promises that.

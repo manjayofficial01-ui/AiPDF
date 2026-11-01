@@ -639,13 +639,49 @@ ipcMain.handle('fs:read', async (_e, filePath) => {
   }
 });
 
-ipcMain.handle('fs:write', async (_e, filePath, data) => {
+/**
+ * Write a document so an interrupted save cannot destroy the original.
+ * Implementation and reasoning live in safewrite.js, which is unit-tested in
+ * plain Node (`npm run test:trust`).
+ */
+const { safeWrite } = require('./safewrite');
+
+ipcMain.handle('fs:write', async (_e, filePath, data, opts) => {
   if (!pathGranted(filePath)) return { ok: false, error: 'This location has not been chosen in AiPDF Editor.' };
   try {
     const buf = Buffer.from(data);
     await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.promises.writeFile(filePath, buf);
-    return { ok: true, path: filePath, size: buf.length };
+    return { ok: true, ...(await safeWrite(filePath, buf, opts && typeof opts === 'object' ? opts : {})) };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
+/** The previous saved revision of a document, if a backup of it exists. */
+ipcMain.handle('fs:backup-info', async (_e, filePath) => {
+  if (!pathGranted(filePath)) return { ok: false, error: 'This file has not been opened in AiPDF Editor.' };
+  const bak = filePath + '.bak';
+  try {
+    const st = await fs.promises.stat(bak);
+    return { ok: true, path: bak, size: st.size, mtime: st.mtimeMs };
+  } catch {
+    return { ok: false, error: 'No backup of this file.' };
+  }
+});
+
+/**
+ * Roll a document back to `<name>.bak`, and put the bytes it had just before
+ * into that same backup so the rollback is itself undoable.
+ */
+ipcMain.handle('fs:restore-backup', async (_e, filePath) => {
+  if (!pathGranted(filePath)) return { ok: false, error: 'This file has not been opened in AiPDF Editor.' };
+  const bak = filePath + '.bak';
+  try {
+    const previous = await fs.promises.readFile(filePath);
+    const restored = await fs.promises.readFile(bak);
+    await safeWrite(filePath, restored, { backup: false });
+    await safeWrite(bak, previous, { backup: false });
+    return { ok: true, path: filePath, size: restored.length };
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
   }

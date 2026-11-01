@@ -11,7 +11,7 @@ import { loadPdfBytes, buildPages, relayout, renderVisible, scrollToPage, render
 import { loadFileAnnotations, renderPageAnnotations, renderAllAnnotations, ANNOT_TYPES, makeAnnot, normalizeRect, loadAttachments } from './annots.js';
 import { loadStoredUserFonts, customFontFamilies, isUserFont, removeUserFont, registerCustomFont, getFontkit, listSystemFonts, addSystemFont } from './fonts.js';
 import { indexDocumentFonts, resetDocumentFonts, resolveFontFor } from './fontresolve.js';
-import { buildPdf, buildBlank, buildFromImages, buildExtract, buildMerge, readMetadata, probeEncryption, drainFontSubstitutions, buildNup, buildSingleStrip, buildPoster, buildBooklet, buildRepaired } from './pdfwrite.js';
+import { buildPdf, buildBlank, buildFromImages, buildExtract, buildMerge, readMetadata, probeEncryption, countSignatures, drainFontSubstitutions, buildNup, buildSingleStrip, buildPoster, buildBooklet, buildRepaired } from './pdfwrite.js';
 import { initSidebar, renderSidebar, setSidebar, renderSidebarChrome } from './sidebar.js';
 import { initTools, selectAnnot, transformAnnot, clearFormat } from './tools.js';
 import { initTextEditing, replaceAllInDocument, commitBlockEdit, editableBlocks, editableSource, applyDirectFormat, directEditorOpen, directEditorState, openDirectEditor, openEditorForEdit, openInlineTextbox, recognizePageForEditing, mergeBlocksIntoParagraph, threadEditFrames, previewEditLayout, toggleRegionMode, clearEditRegion } from './textedit.js';
@@ -25,7 +25,9 @@ import { openSmartRedact } from './smartredact.js';
 import { runContractReview } from './contract.js';
 import { toggleReadAloud as ttsToggle, stopReadAloud as ttsStop, openTtsSettings } from './tts.js';
 import { runAgent, agentSelfTest } from './agent.js';
+import { runVerifiedEdit, planSelfTest } from './editplan.js';
 import { detectScannedPages, OCR_LANGS } from './ocr.js';
+import { captureRedactionSecrets, verifyRedactions, redactionVerdict } from './redaction.js';
 import { buildComparison, comparisonReport, jumpToPage } from './compare.js';
 import { scalePages, removeBlankPages, rasterizePages, COLOR_PRESETS, colorPresetById, parsePageRange, allPages } from './docxtools.js';
 import {
@@ -107,6 +109,16 @@ async function boot() {
   // AI Smart Redact's "Mark + Apply & Sanitize" button lives in a dialog that
   // must not import app.js (circular) — it signals over the store bus instead.
   on('smartredact:apply', () => { applyRedactions(true); });
+  // Verified AI editing plans itself in editplan.js, but the validator has to
+  // build and re-read the candidate file, and those two helpers live here —
+  // so the goal arrives over the bus and the app hands them back.
+  on('ai:planRun', (goal) => runVerifiedEdit(goal, planDeps()));
+  // Headless edit-plan test (scripts/editplan-test.mjs) drives the same entry
+  // point the Agent dock uses, with the model scripted through `chat`.
+  window.__aipdfRunPlan = (goal, chat) => runVerifiedEdit(goal, chat ? { ...planDeps(), chat } : planDeps());
+  // Headless redaction-integrity test (scripts/redact-flow-test.mjs): builds the
+  // real candidate file so the checker can be pointed at it.
+  window.__aipdfBuildBytes = (doc) => buildDocBytes(doc || activeDoc());
   // Headless OCR test (main.js --ocr-test): runs Tesseract on page 1 of the
   // open document and reports confidence + a text sample. Requires network
   // for the first language-pack download; results are cached afterwards.
@@ -237,7 +249,11 @@ async function boot() {
   // Headless agent self-test (main.js --agent-test): tool registry, page-range
   // parsing and schema sanity — no model, no network.
   window.__aipdfAgentSelfTest = () => {
-    try { return agentSelfTest(); } catch (e) { return { passed: false, errors: [String(e && e.stack ? e.stack : e)] }; }
+    try {
+      const out = agentSelfTest();
+      const plan = planSelfTest();
+      return { ...out, checks: { ...out.checks, ...Object.fromEntries(Object.entries(plan.checks).map(([k, v]) => ['plan_' + k, v])) }, passed: out.passed && plan.passed, errors: (out.errors || []).concat(plan.errors || []) };
+    } catch (e) { return { passed: false, errors: [String(e && e.stack ? e.stack : e)] }; }
   };
 
   // Headless PDF→Word self-test (scripts/pdf2word-test.mjs): exercises the
@@ -1472,6 +1488,13 @@ function ribbonGroupsForMode() {
         { icon: 'wand', label: 'Rewrite…', act: () => rewrite() },
         { icon: 'check', label: 'Proofread', act: () => proofread() },
       ] },
+      // The two ways to let the model act: plan-then-approve, or edit directly.
+      // Both are one click apart so the user is choosing a behaviour, not
+      // discovering it halfway through a run.
+      { title: 'Edit for me', items: [
+        { icon: 'shield', label: 'Verified edit plan…', act: () => onMenuAction('ai:planEdit') },
+        { icon: 'wand', label: 'Agent (edits as it works)', act: () => onMenuAction('ai:agent') },
+      ] },
       { title: 'Model', items: [
         { icon: 'settings', label: 'Settings', act: () => configureAI() },
       ] },
@@ -1946,6 +1969,12 @@ export async function openDocFromBytes(bytes, name, path = null, password = null
     // status-bar lock — none of which could ever fire before this was set.
     doc.passwordProtected = await probeEncryption(bytes);
     doc.password = doc.passwordProtected ? (password || '') : null;
+    // Applied signatures are counted at open so the save path can warn before
+    // it rebuilds the file out from under them. The literal scan is the gate:
+    // /ByteRange is what makes a signature real, and paying a full pdf-lib load
+    // for every file opened to discover that almost none have one is not worth
+    // it. Files that do get the precise count.
+    doc.signatureCount = looksSigned(bytes) ? await countSignatures(bytes) : 0;
     state.docs.push(doc);
     setDocError('');
     state.activeId = doc.id;
@@ -2092,7 +2121,7 @@ function hideWorkspaceCard() {
 
 /* ══ Saving ═════════════════════════════════════════════════════════════ */
 
-async function buildDocBytes(doc, opts = {}) {
+export async function buildDocBytes(doc, opts = {}) {
   const o = { ...opts };
   if (doc.passwordProtected) {
     if (doc.password == null) {
@@ -2130,19 +2159,75 @@ async function buildDocBytes(doc, opts = {}) {
   return await buildPdf(doc, o);
 }
 
+/**
+ * Stop an in-place save from quietly destroying a signature.
+ *
+ * A /ByteRange signature covers the file up to its trailer, so rebuilding the
+ * document — which is what every save here does — invalidates it. The broken
+ * signature still renders, it only reads as tampered, which is the worst kind
+ * of failure: nothing looks wrong. Asked once per document, with Save As
+ * offered as the answer that keeps the original whole.
+ *
+ * @returns {Promise<'save'|'as'|'cancel'>}
+ */
+async function signatureGuard(doc) {
+  if (!doc.signatureCount || doc.signatureWaived) return 'save';
+  const go = await showModal({
+    title: 'This file is digitally signed',
+    width: 'narrow',
+    body: (b) => b.appendChild(el('div', {
+      style: { lineHeight: '1.55', userSelect: 'text' },
+      text: `${doc.name} carries ${doc.signatureCount} cryptographic signature${doc.signatureCount === 1 ? '' : 's'}. Saving over it rewrites the bytes the signature covers, so readers will report the document as tampered with and the signer's attestation no longer holds. Saving to a new file keeps the signed original intact.`,
+    })),
+    buttons: [
+      { label: 'Cancel', value: 'cancel', kind: 'ghost' },
+      { label: 'Save As…', value: 'as', kind: 'ghost' },
+      { label: 'Break the signature and save', value: 'save', kind: 'danger', default: true },
+    ],
+  });
+  if (go === 'save') { doc.signatureWaived = true; return 'save'; }
+  return go === 'as' ? 'as' : 'cancel';
+}
+
+/** Cheap pre-filter for `countSignatures`: does the file mention /ByteRange at
+ *  all? Decoding as latin1 keeps every byte addressable as a code point, so a
+ *  plain indexOf finds the ASCII key without parsing the file. */
+function looksSigned(bytes) {
+  if (!bytes || !bytes.length) return false;
+  try {
+    return new TextDecoder('latin1').decode(bytes).indexOf('/ByteRange') >= 0;
+  } catch {
+    return false;
+  }
+}
+
+/** The three app-owned helpers the edit-plan pipeline needs: build a candidate
+ *  file, read it back with an independent extractor, and commit it. Passed in
+ *  rather than imported, because editplan.js must not import the app shell. */
+function planDeps() {
+  return { app: { buildDocBytes, extractTextFromBytes, saveDoc } };
+}
+
 export async function saveDoc(doc = activeDoc()) {
   if (!doc) return false;
   if (!doc.path) return saveDocAs(doc);
+  const gate = await signatureGuard(doc);
+  if (gate === 'cancel') return false;
+  if (gate === 'as') return saveDocAs(doc);
   try {
     setBusy(true, 'Saving…');
-    const bytes = await buildDocBytes(doc);
-    const res = await window.api.writeFile(doc.path, bytes);
+    let bytes = await buildDocBytes(doc);
+    const checked = await proofForSave(doc, bytes);
+    if (!checked) { setBusy(false); return false; }
+    bytes = checked;
+    const res = await window.api.writeFile(doc.path, bytes, { backup: settings.backupBeforeSave });
     if (!res.ok) throw new Error(res.error);
     doc.bytes = bytes;
+    doc.redactionProof = null;
     setClean(doc);
     renderTabs();
     updateStatus();
-    toast('Saved', 'ok', 1800);
+    toast(res.backup ? 'Saved — previous version kept' : 'Saved', 'ok', 2200);
     return true;
   } catch (e) {
     toast(e.message || 'Save failed', 'err', 6000);
@@ -2160,18 +2245,22 @@ export async function saveDocAs(doc = activeDoc()) {
   if (!path) return false;
   try {
     setBusy(true, 'Saving…');
-    const bytes = await buildDocBytes(doc);
-    const res = await window.api.writeFile(path, bytes);
+    let bytes = await buildDocBytes(doc);
+    const checked = await proofForSave(doc, bytes);
+    if (!checked) { setBusy(false); return false; }
+    bytes = checked;
+    const res = await window.api.writeFile(path, bytes, { backup: settings.backupBeforeSave });
     if (!res.ok) throw new Error(res.error);
     doc.path = path;
     doc.name = path.split(/[\\/]/).pop();
     doc.bytes = bytes;
+    doc.redactionProof = null;
     setClean(doc);
     addRecent(path, doc.name);
     window.api.setRepresented(path);
     renderTabs();
     updateStatus();
-    toast('Saved', 'ok', 1800);
+    toast(res.backup ? 'Saved — previous version kept' : 'Saved', 'ok', 2200);
     return true;
   } catch (e) {
     toast(e.message || 'Save failed', 'err', 6000);
@@ -2189,13 +2278,63 @@ async function saveCopy() {
   try {
     setBusy(true, 'Exporting…');
     const bytes = await buildDocBytes(doc);
-    const res = await window.api.writeFile(path, bytes);
+    // A copy is not a revision of anything, so no backup slot is spent on it.
+    const res = await window.api.writeFile(path, bytes, { backup: false });
     toast(res.ok ? 'Copy saved' : 'Failed: ' + res.error, res.ok ? 'ok' : 'err');
   } catch (e) {
     toast(e.message, 'err', 6000);
   } finally {
     setBusy(false);
   }
+}
+
+/**
+ * Roll the open document back to the revision that the last save replaced.
+ *
+ * The swap is two-phase in main: the previous file becomes the backup as the
+ * restored one lands, so pressing this twice puts the file back the way it was.
+ */
+async function restorePreviousVersion() {
+  const doc = activeDoc();
+  if (!doc) return;
+  if (!doc.path) return toast('This document has never been saved, so there is no previous version.', 'warn');
+  const info = await window.api.backupInfo(doc.path);
+  if (!info.ok) return toast('No previous version of this file was kept.', 'warn');
+  const ago = formatAge(info.mtime);
+  const go = await showModal({
+    title: 'Restore previous version',
+    width: 'narrow',
+    body: (b) => b.appendChild(el('div', {
+      style: { lineHeight: '1.55', userSelect: 'text' },
+      text: `This replaces ${doc.name} with the version saved before last (${formatBytes(info.size)}, ${ago}). The current file becomes the backup, so you can swap back.`,
+    })),
+    buttons: [
+      { label: 'Cancel', value: false, kind: 'ghost' },
+      { label: 'Restore', value: true, kind: 'primary', default: true },
+    ],
+  });
+  if (!go) return;
+  try {
+    setBusy(true, 'Restoring…');
+    const res = await window.api.restoreBackup(doc.path);
+    if (!res.ok) throw new Error(res.error);
+    const fresh = await window.api.readFile(doc.path);
+    if (!fresh.ok) throw new Error(fresh.error);
+    await reloadDocFromBytes(doc, new Uint8Array(fresh.data), 'Previous version restored');
+    toast('Previous version restored', 'ok', 3000);
+  } catch (e) {
+    toast('Restore failed: ' + (e.message || e), 'err', 6000);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function formatAge(ms) {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} minutes ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} hours ago`;
+  return `${Math.round(s / 86400)} days ago`;
 }
 
 /* ══ Protection ═════════════════════════════════════════════════════════ */
@@ -2234,8 +2373,11 @@ async function compareDocuments() {
   openComparePanel(cmp, doc.name || 'This document', paths[0].split(/[\\/]/).pop(), aTexts, bTexts);
 }
 
-/** Extract page-by-page text from a raw PDF using the renderer's own pdf.js. */
-async function extractTextFromBytes(bytes) {
+/** Extract page-by-page text from a raw PDF using the renderer's own pdf.js.
+ *  The independent reader: Compare uses it, and the edit-plan validator uses it
+ *  to check what a save would actually contain rather than what the model of the
+ *  document says it should. */
+export async function extractTextFromBytes(bytes) {
   const pdfjsLib = await import('/v/pdf.min.mjs');
   pdfjsLib.GlobalWorkerOptions.workerSrc = '/v/pdf.worker.min.mjs';
   const pdf = await pdfjsLib.getDocument({ data: bytes.slice(0), useSystemFonts: false }).promise;
@@ -3152,6 +3294,10 @@ async function applyRedactions(sanitize) {
     : `Apply ${reds.length} redaction mark(s)? Areas are covered with black boxes. Hidden text underneath may still be extractable — use Sanitize for irreversible removal.`;
   const ok = await confirmDialog(msg, { okLabel: sanitize ? 'Sanitize' : 'Apply', danger: sanitize });
   if (!ok) return;
+  // Record what is about to be destroyed, while the text is still where it was.
+  // The save that follows is checked against this list (see proofForSave).
+  const proof = await captureRedactionSecrets(doc, reds);
+  doc.redactionProof = (doc.redactionProof || []).concat(proof);
   if (sanitize) {
     const pages = [...new Set(reds.map((r) => r.page))].sort((a, b) => a - b);
     const items = doc.pageOps?.items || Array.from({ length: doc.numPages }, (_, i) => ({ t: 'src', i }));
@@ -3169,6 +3315,63 @@ async function applyRedactions(sanitize) {
   toast(sanitize ? 'Redactions sanitized — save to write the file' : 'Redaction marks applied — save to write the file', 'ok', 5000);
   renderAllAnnotations();
   emit('annots');
+}
+
+/**
+ * Prove the redactions before the file is written.
+ *
+ * Called with the bytes a save is about to commit. If a marked string is still
+ * extractable, the cover box is not a redaction and the user gets to choose:
+ * turn those pages into images and re-check, keep the file as it is, or stop.
+ * Returning null means "do not write".
+ */
+async function proofForSave(doc, bytes) {
+  const proof = doc.redactionProof || [];
+  if (!proof.length) return bytes;
+  let v;
+  try {
+    setBusy(true, 'Verifying redactions…');
+    v = await verifyRedactions(bytes, proof);
+  } catch (e) {
+    v = null;
+    console.error('redaction verification failed', e);
+  } finally {
+    setBusy(false);
+  }
+  if (!v) return bytes;                       // checker itself failed — do not block a save
+  if (v.ok) { toast(redactionVerdict(v), 'ok', 4000); return bytes; }
+  const pages = [...new Set(v.leaks.map((l) => l.page))];
+  const leakText = v.leaks.slice(0, 4).map((l) => `"${l.secret.slice(0, 60)}" (page ${l.page + 1})`).join('\n');
+  const more = v.leaks.length > 4 ? `\n…and ${v.leaks.length - 4} more` : '';
+  const choice = await showModal({
+    title: 'Redaction check failed',
+    width: 'narrow',
+    body: (b) => b.appendChild(el('pre', {
+      style: { whiteSpace: 'pre-wrap', lineHeight: '1.5', userSelect: 'text', fontFamily: 'inherit' },
+      text: `${v.leaks.length} marked string(s) can still be read out of the file:\n${leakText}${more}\n\nCovering text with a black box does not remove it. Converting page${pages.length === 1 ? '' : 's'} ${pages.map((p) => p + 1).join(', ')} to an image does.`,
+    })),
+    buttons: [
+      { label: 'Cancel save', value: 'cancel', kind: 'ghost' },
+      { label: 'Save anyway', value: 'keep', kind: 'ghost' },
+      { label: 'Convert to image & re-check', value: 'sanitize', kind: 'primary', default: true },
+    ],
+  });
+  if (choice === 'cancel' || !choice) return null;
+  if (choice === 'keep') { toast('Saved with text still extractable under the redactions.', 'warn', 7000); return bytes; }
+  const items = doc.pageOps?.items || Array.from({ length: doc.numPages }, (_, i) => ({ t: 'src', i }));
+  const leakPages = new Set(pages);
+  doc.pageOps = { items: items.map((it) => (it.t === 'src' && leakPages.has(it.i) ? { t: 'raster', i: it.i, rects: [], dpi: 200 } : it)) };
+  const re = await buildDocBytes(doc);
+  let v2;
+  try { setBusy(true, 'Verifying redactions…'); v2 = await verifyRedactions(re, proof); }
+  catch { v2 = null; }
+  finally { setBusy(false); }
+  if (v2 && !v2.ok && v2.leaks.length) {
+    alertDialog('Some content is still extractable after converting those pages to images. Review before sharing this file.', { title: 'Redaction check' });
+    return re;
+  }
+  toast(v2 ? redactionVerdict(v2) : 'Pages converted — verification unavailable', 'ok', 5000);
+  return re;
 }
 
 /* ══ Export ═════════════════════════════════════════════════════════════ */
@@ -4533,6 +4736,7 @@ function updateStatus() {
   const scannedCount = doc && doc.scanned ? doc.scanned.size : 0;
   const bits = [];
   if (doc && doc.passwordProtected) bits.push(`${svgIcon('lock', 11)} Encrypted`);
+  if (doc && doc.signatureCount) bits.push(`${svgIcon('signature', 11)} Signed — saving over it invalidates`);
   if (scannedCount) bits.push(`${svgIcon('scan', 11)} ${scannedCount} scanned`);
   sec.innerHTML = bits.join(' · ');
   // Undo/Redo had no disabled state at all, so they looked live with no history.
@@ -4650,6 +4854,8 @@ const COMMANDS = [
   ['File', 'Open…', 'open', 'file:open'],
   ['File', 'Save', 'save', 'file:save'],
   ['File', 'Save As…', 'save', 'file:saveAs'],
+  ['File', 'Save a Copy…', 'save', 'file:saveCopy'],
+  ['File', 'Restore Previous Version…', 'undo', 'file:restoreBackup'],
   ['File', 'Print…', 'print', 'file:print'],
   ['File', 'New blank PDF', 'plus', 'file:new'],
   ['File', 'Images → PDF', 'image', 'file:images'],
@@ -4712,6 +4918,8 @@ const COMMANDS = [
   ['Protect', 'Unlock form fields…', 'unlock', 'protect:unlockForms'],
   ['Protect', 'AI Smart Redact…', 'shield', 'ai:smartredact'],
   ['AI', 'Ask AI', 'ai', 'ai:ask'],
+  ['AI', 'Verified edit plan…', 'ai', 'ai:planEdit'],
+  ['AI', 'Agent mode', 'wand', 'ai:agent'],
   ['AI', 'Summarise document', 'sparkle', 'ai:summarize'],
   ['AI', 'Compare all open documents', 'brain', 'ai:summarizeAll'],
   ['AI', 'Extract structured data…', 'table', 'ai:extractData'],
@@ -4940,6 +5148,7 @@ function shortcutHelpHtml() {
     ['K I X M E', 'Stamp, Image, Redact, Measure, Eraser'],
     ['Delete / Backspace', 'Delete the selection'],
     ['Ctrl+J', 'Ask AI'],
+    ['Ctrl+Alt+E', 'AI — verified edit plan (propose, preview, approve)'],
     ['Ctrl+Alt+A', 'AI Agent — edit this PDF'],
     ['Ctrl+Shift+A / B / P', 'Comments list / Bookmarks / Page thumbnails'],
     ['Ctrl+K', 'Command palette'],
@@ -5330,6 +5539,7 @@ async function onMenuAction(action, payload) {
     case 'file:save': await saveDoc(); break;
     case 'file:saveAs': await saveDocAs(); break;
     case 'file:saveCopy': await saveCopy(); break;
+    case 'file:restoreBackup': await restorePreviousVersion(); break;
     case 'file:close': if (doc) await closeDoc(doc.id); break;
     case 'file:print': await printDocument(); break;
     case 'file:properties': await documentProperties(); break;
@@ -5646,6 +5856,11 @@ async function onMenuAction(action, payload) {
 
     case 'ai:ask': openAIDock(); break;
     case 'ai:agent': state.ai.mode = 'agent'; openAIDock(); break;
+    case 'ai:planEdit': {
+      const goal = await promptDialog('What should change? The agent will inspect the document and come back with a plan to approve before anything is written.', '', { title: 'Verified AI edit', okLabel: 'Plan it' });
+      if (goal && goal.trim()) { state.ai.mode = 'agent'; openAIDock(); emit('ai:planRun', goal.trim()); }
+      break;
+    }
     case 'ai:summarize': await summarize(); break;
     case 'ai:summarizeAll': await import('./ai.js').then((m) => m.summarizeAllDocs()); break;
     case 'ai:extractData': await extractData(); break;

@@ -879,6 +879,12 @@ export async function pageRulePaths(doc, pageIndex) {
  */
 async function removeOwnedSource(doc, pageIndex, e) {
   if (e.kind === 'o' || e.bgSource === 'ocr') return { removal: 'cover', removed: 0, fallbackReason: 'scan' };
+  /* An Area Direct Edit block can own only PART of a source run (pdf.js hands
+   * us a whole line as one operator). Excision removes the entire show-text
+   * operator, so cutting it here would erase the words OUTSIDE the marquee
+   * that this edit does not own. Cover those glyphs instead — the export
+   * warning reports the fallback, and no unselected text is lost. */
+  if (e.partialSource) return { removal: 'cover', removed: 0, fallbackReason: 'partial-text-item' };
   // Excise each owned source rect SEPARATELY. A merged paragraph may own lines 1
   // and 3 while skipping line 2 — a single union rect would remove line 2, which
   // the replacement does not contain, and the words would be gone for good.

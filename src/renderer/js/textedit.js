@@ -4,7 +4,12 @@ import {
 } from './viewer.js';
 import { el, rgbToCss, hexToRgb, rgbToHex, clamp, toast, uid } from './util.js';
 import { renderPageAnnotations } from './annots.js';
-import { groupTextBlocks, editForBlock, blockText, wrapBlockText, blocksFromOcrLines, flatOcrLines, ocrSplitSegments, ocrCellBlock, textEditDrawBox, textItemBoxes, rectCentreInside } from './textblocks.js';
+import {
+  groupTextBlocks, editForBlock, blockText, wrapBlockText,
+  blocksFromFlatOcrLines, flatOcrLines, flatOcrLinesInRegion,
+  ocrSplitSegments, ocrCellBlock, textEditDrawBox, textItemBoxes,
+  rectClip, clipTextContentToRegion,
+} from './textblocks.js';
 import { rectUnion } from './textops.js';
 import { detectTables, tablesFromSegmentItems, tableForBlock, tableLabel } from './tables.js';
 import {
@@ -218,54 +223,137 @@ export async function editableSource(pageIndex) {
   const doc = activeDoc();
   if (!doc?.pdf || pageIndex < 0 || pageIndex >= doc.numPages) return { blocks: [], source: 'none' };
   const width = doc.pageSizes?.[pageIndex]?.w || 595;
+  const height = doc.pageSizes?.[pageIndex]?.h || 842;
   const region = currentRegionRect(pageIndex);
   try {
     const tc = await getTextContent(pageIndex);
-    let native = groupTextBlocks(tc, width).filter((b) => (b.text || '').trim().length > 0);
-    /* With an area in force, native text is cut down ITEM BY ITEM: a block is
-     * only as wide as the words the marquee actually covers. Filtering whole
-     * blocks afterwards is what let a row that ran past the box be edited as a
-     * unit — the words outside the selection included. */
-    if (native.length && region) {
-      const only = new Set(textItemBoxes(tc)
-        .filter((b) => rectCentreInside(b.rect, region))
-        .map((b) => b.index));
-      native = only.size
-        ? groupTextBlocks(tc, width, only).filter((b) => (b.text || '').trim().length > 0)
-        : [];
-    }
+    /* Area Direct Edit is clipped at GLYPH level, not item level. pdf.js hands
+     * us one TextItem per drawn run — usually a WHOLE LINE — so the old
+     * "item centre inside the box" test made that entire line editable, words
+     * well outside the marquee included. `clipTextContentToRegion` keeps the
+     * items that fit whole and cuts straddling items down to the characters
+     * whose own boxes are inside the rectangle. */
+    const clip = region ? clipTextContentToRegion(tc, region) : null;
+    const sourceTc = clip ? clip.tc : tc;
+    const native = sourceTc.items?.length
+      ? groupTextBlocks(sourceTc, width).filter((b) => (b.text || '').trim().length > 0)
+      : [];
     if (native.length) {
       /* Tables are recognised HERE, before anything consumes the block list, so
        * that every consumer — the hit targets, the Direct Editor, replace-all,
        * the agent — agrees on what an editable unit is: one block per CELL. */
-      const pageH = doc.pageSizes?.[pageIndex]?.h || 842;
       const paths = await pageRules(doc, pageIndex);
-      const found = detectTables(native, { page: pageIndex, pageW: width, pageH, ...(paths ? { paths } : {}) });
-      const split = splitBlocksByCells(tc, native, found, width);
-      tablesByBlocks.set(split.blocks, split.tables);
-      return { blocks: split.blocks, source: 'native' };
+      const found = detectTables(native, { page: pageIndex, pageW: width, pageH: height, ...(paths ? { paths } : {}) });
+      const split = splitBlocksByCells(sourceTc, native, found, width);
+      const blocks = clip ? finaliseRegionBlocks(split.blocks, clip, pageIndex, region) : split.blocks;
+      reindexTableBlocks(split.tables, split.blocks, blocks);
+      tablesByBlocks.set(blocks, split.tables);
+      return { blocks, source: 'native' };
     }
   } catch { /* fall through to OCR — an unreadable page is not an empty one */ }
 
-  // A region read wins over the page's own recognition: it IS the area.
-  const rec = regionOcrRecord(pageIndex, region) || doc.ocr?.[pageIndex];
-  if (rec?.lines?.length) {
-    const height = doc.pageSizes?.[pageIndex]?.h || 842;
-    const ocr = blocksFromOcrLines(rec.lines, width, height, rec.dpi || 200, pageIndex, region)
-      .filter((b) => (b.text || '').trim().length > 0);
-    if (ocr.length) {
-      /* Tables live on scans too — the tender-sheet case: one OCR "line"
-       * reads straight across several cells, so paragraph grouping fuses the
-       * whole table into a handful of row blocks. Detect the grid from OCR
-       * column segments and rebuild ONE block per cell, exactly like the
-       * native-text path does. */
-      const split = splitOcrBlocksByCells(rec, ocr, width, height, pageIndex, region);
-      tablesByBlocks.set(split.blocks, split.tables);
-      return { blocks: split.blocks, source: 'ocr' };
+  /* With a marquee in force ONLY the region's own read may be used.
+   * `doc.ocr[page]` means "the WHOLE PAGE was recognised"; falling back to it
+   * would put lines from outside the box straight back into the editable set —
+   * the very thing the region read was introduced to prevent. */
+  const rec = region ? regionOcrRecord(pageIndex, region) : doc.ocr?.[pageIndex];
+  if (!rec?.lines?.length) return { blocks: [], source: 'none' };
+  const flat = region
+    ? flatOcrLinesInRegion(rec.lines, height, rec.dpi || 200, region)
+    : flatOcrLines(rec.lines, height, rec.dpi || 200);
+  const ocr = blocksFromFlatOcrLines(flat, width, pageIndex)
+    .filter((b) => (b.text || '').trim().length > 0);
+  if (!ocr.length) return { blocks: [], source: 'ocr-empty' };
+  /* Tables live on scans too — the tender-sheet case: one OCR "line" reads
+   * straight across several cells, so paragraph grouping fuses the whole table
+   * into a handful of row blocks. Detect the grid from the SAME word-trimmed
+   * line list and rebuild ONE block per cell. */
+  const split = splitOcrBlocksByCells(flat, ocr, width, pageIndex);
+  const blocks = region ? finaliseOcrRegionBlocks(split.blocks, pageIndex, region) : split.blocks;
+  reindexTableBlocks(split.tables, split.blocks, blocks);
+  tablesByBlocks.set(blocks, split.tables);
+  return { blocks, source: 'ocr' };
+}
+
+/** Region clamping can drop a block whose footprint misses the box entirely.
+ *  `cell.blocks` holds INDICES into the pre-clamp array, so leaving it alone
+ *  would point a cell hit target at a different block — the exact opposite of
+ *  pin-point precision. Rebuild the indices by object identity. Both `t.cells`
+ *  and `t.rows[].cells` are walked (they usually alias the same objects, hence
+ *  the `seen` set), so neither representation can keep a stale number. */
+function reindexTableBlocks(tables, before, after) {
+  if (!Array.isArray(tables) || !Array.isArray(before) || before === after
+    || before.length === after.length) return;
+  const at = new Map(after.map((b, i) => [b, i]));
+  const remap = (i) => { const v = at.get(before[i]); return v == null ? null : v; };
+  const seen = new Set();
+  for (const t of tables) {
+    const cells = [...(t.cells || []), ...(t.rows || []).flatMap((r) => r.cells || [])];
+    for (const c of cells) {
+      if (!c || seen.has(c)) continue;
+      seen.add(c);
+      if (Array.isArray(c.blocks)) {
+        c.blocks = c.blocks.map(remap).filter((x) => x != null).sort((x, y) => x - y);
+      }
     }
-    return { blocks: [], source: 'ocr-empty' };
   }
-  return { blocks: [], source: 'none' };
+}
+
+/** Give area blocks their own identity and stop every footprint at the box.
+ *
+ *  `itemIndices` are mapped back to the ORIGINAL page items (the writer and
+ *  `editForBlock` need real indices), but the key is derived from the CLIPPED
+ *  indices so the same area always resolves to the same edit and can never be
+ *  confused with a whole-page edit of the same source run. `partialSource`
+ *  marks a block holding a fragment of a longer run: excising that operator
+ *  would delete the words OUTSIDE the marquee, so the writer uses a cover. */
+function finaliseRegionBlocks(blocks, clip, pageIndex, region) {
+  const out = [];
+  for (const b of blocks) {
+    const local = b.itemIndices || [];
+    const cover = rectClip(b.coverRect, region);
+    if (!cover) continue;
+    b.itemIndices = [...new Set(local.map((i) => clip.originMap[i]).filter(Number.isInteger))]
+      .sort((x, y) => x - y);
+    b.partialSource = local.some((i) => clip.partial[i]);
+    // The rectangle is part of the identity: two marquees over different words
+    // of ONE source line both clip down to a single "item 0", and without it
+    // the second area would resolve back to the first area's committed edit.
+    b.key = `r:${pageIndex}:${region.map((v) => v.toFixed(1)).join('_')}:${local.join('.')}`;
+    b.regionRect = region.slice();
+    b.coverRect = cover;
+    b.rect = cover.slice();
+    b.ownRect = rectClip(b.ownRect || cover, region) || cover.slice();
+    b.maxHeight = Math.max(1, cover[3] - cover[1]);
+    if (Array.isArray(b.baseline)) {
+      b.baseline = [Math.max(b.baseline[0], region[0]), clamp(b.baseline[1], region[1], region[3])];
+      b.maxWidth = Math.max(4, Math.min(b.maxWidth || 10, region[2] - b.baseline[0]));
+    }
+    out.push(b);
+  }
+  return out;
+}
+
+/** OCR area blocks: same geometry clamp, distinct region-scoped identity. */
+function finaliseOcrRegionBlocks(blocks, pageIndex, region) {
+  const suffix = region.map((v) => v.toFixed(1)).join('_');
+  const out = [];
+  for (const b of blocks) {
+    const cover = rectClip(b.coverRect, region);
+    if (!cover) continue;
+    b.key = `or:${pageIndex}:${(b.lineIds || []).join('.')}:${suffix}`;
+    b.regionRect = region.slice();
+    b.coverRect = cover;
+    b.rect = cover.slice();
+    b.ownRect = rectClip(b.ownRect || cover, region) || cover.slice();
+    b.maxHeight = Math.max(1, cover[3] - cover[1]);
+    if (Array.isArray(b.baseline)) {
+      b.baseline = [Math.max(b.baseline[0], region[0]), clamp(b.baseline[1], region[1], region[3])];
+      b.maxWidth = Math.max(4, Math.min(b.maxWidth || 10, region[2] - b.baseline[0]));
+    }
+    out.push(b);
+  }
+  return out;
 }
 
 /**
@@ -280,10 +368,10 @@ export async function editableSource(pageIndex) {
  * inside any table pass through untouched; a block whose text all lands in
  * table cells is replaced by its per-cell pieces.
  */
-function splitOcrBlocksByCells(rec, blocks, pageWidth, pageHeight, pageIndex, regionRect = null) {
-  const dpi = rec.dpi || 200;
-  const flat = flatOcrLines(rec.lines, pageHeight, dpi)         // li = index into rec.lines
-    .filter((l) => !regionRect || rectCentreInside([l.x, l.bottom, l.end, l.top], regionRect));
+function splitOcrBlocksByCells(flat, blocks, pageWidth, pageIndex) {
+  // `flat` is already the region's word-trimmed line list (or the whole page's
+  // when no marquee is active). Re-flattening here would put the outside words
+  // of a full OCR row back into the cell blocks.
   if (!flat.length) return { blocks, tables: [] };
   const flatByLi = new Map(flat.map((l) => [l.li, l]));
   const segments = ocrSplitSegments(flat);
@@ -658,6 +746,7 @@ export async function renderEditableBlocks(pageIndex = null) {
     rec.wrap.querySelectorAll('.editable-text-layer').forEach((n) => n.remove());
     if (state.tool !== 'editText' || !rec.rendered) continue;
     const doc = activeDoc();
+    const regionRectForHits = currentRegionRect(i);
     const { blocks, source } = await editableSource(i);
     if (renderGen.get(i) !== gen) continue;              // superseded
     if (!doc || doc !== activeDoc() || state.tool !== 'editText' || !rec.wrap.isConnected) continue;
@@ -674,7 +763,7 @@ export async function renderEditableBlocks(pageIndex = null) {
         }
       }
     }
-    const grid = tableGridLayer(i, tables);
+    const grid = tableGridLayer(i, tables, regionRectForHits);
     if (grid) layer.appendChild(grid);
     // The active marquee region: dashed outline + tag, so "edit this area
     // only" is always visible while it lasts.
@@ -727,7 +816,11 @@ export async function renderEditableBlocks(pageIndex = null) {
       const prior = editForBlock(doc, i, block);
       if (overlapsBox(block.coverRect) || (prior && prior.boxId && doc.annots.some((a) => a.id === prior.boxId))) continue;
       const inCell = cellByBlock.get(n);
-      const r = inCell ? inCell.cell.rect : block.coverRect;
+      let r = inCell ? inCell.cell.rect : block.coverRect;
+      /* A table cell can be far wider than the marquee. Its clickable area must
+       * stop at the box or the user can click text they never selected. */
+      if (regionRectForHits) r = rectClip(r, regionRectForHits) || null;
+      if (!r) continue;
       const a = toCss(i, r[0], r[3]);
       const b = toCss(i, r[2], r[1]);
       const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
@@ -774,7 +867,7 @@ function emptyNotice(pageIndex, source) {
 /** Draw the recognised table structure under the hit targets: a dashed region
  *  per table, a solid outline per cell, and a small "Table 1 · 3×4" tag. The
  *  layer is pointer-events:none so it never eats a click meant for a cell. */
-function tableGridLayer(pageIndex, tables) {
+function tableGridLayer(pageIndex, tables, regionRect = null) {
   if (!tables.length) return null;
   const layer = el('div', { class: 'table-grid', 'aria-hidden': 'true' });
   for (let ti = 0; ti < tables.length; ti++) {
@@ -790,8 +883,10 @@ function tableGridLayer(pageIndex, tables) {
     region.appendChild(el('div', { class: 'table-tag', text: `Table ${ti + 1} · ${t.rows.length}×${t.cols.length}` }));
     for (const row of t.rows) {
       for (const cell of row.cells) {
-        const ca = toCss(pageIndex, cell.rect[0], cell.rect[3]);
-        const cb = toCss(pageIndex, cell.rect[2], cell.rect[1]);
+        const cr = regionRect ? rectClip(cell.rect, regionRect) : cell.rect;
+        if (!cr) continue;
+        const ca = toCss(pageIndex, cr[0], cr[3]);
+        const cb = toCss(pageIndex, cr[2], cr[1]);
         region.appendChild(el('div', { class: 'table-cell', style: {
           left: (Math.min(ca.x, cb.x) - left) + 'px',
           top: (Math.min(ca.y, cb.y) - top) + 'px',
@@ -874,7 +969,10 @@ export async function commitBlockEdit(pageIndex, block, nextText, options = {}) 
     // On a scan the old glyphs are pixels in an image, so the replacement has
     // to paint over them with whatever is actually behind the words — a fixed
     // white would leave a bright patch on a tinted or grey scan.
-    bg: isOcr ? sampleBackdrop(pageIndex, block.coverRect) : [1, 1, 1],
+    // A partial (area-clipped) native run also falls back to a cover, so it
+    // needs the real page colour behind it — a fixed white would leave a bright
+    // patch over the unselected half of a tinted line.
+    bg: (isOcr || block.partialSource) ? sampleBackdrop(pageIndex, block.coverRect) : [1, 1, 1],
     angle: block.angle || 0,
     size: pick('size', block.size),
     color: pick('color', block.color),
@@ -1268,6 +1366,11 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
   const tables = pageTables(pageIndex, blocks);
   const cellHit = tableForBlock(tables, blockIndex);
   const cell = cellHit?.cell || null;
+  // A table cell can run well past the marquee. Inside an area the editor's
+  // frame stops at the box, or typing there would lay text outside the area
+  // the user selected.
+  const region = currentRegionRect(pageIndex);
+  const cellRect = cell ? (region ? rectClip(cell.rect, region) : cell.rect.slice()) : null;
 
   const existing = editForBlock(doc, pageIndex, block);
 
@@ -1292,15 +1395,15 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
   const movedBox = existing?.baseline && block.baseline
     && (existing.baseline[0] !== block.baseline[0] || existing.baseline[1] !== block.baseline[1])
     ? textEditDrawBox(existing) : null;
-  const r = cell ? cell.rect : (movedBox || block.coverRect);
+  const r = cellRect || (movedBox || block.coverRect);
   const a = toCss(pageIndex, r[0], r[3]);
   const b = toCss(pageIndex, r[2], r[1]);
   const left = Math.min(a.x, b.x), top = Math.min(a.y, b.y);
 
   // Mutable box, in points — the handles below edit these. In a table the box
   // starts as the cell, so the editor's footprint and the written frame agree.
-  let width = cell ? (cell.rect[2] - cell.rect[0]) : (existing?.maxWidth || block.maxWidth);
-  let height = cell ? (cell.rect[3] - cell.rect[1]) : (existing?.maxHeight || block.maxHeight);
+  let width = cellRect ? (cellRect[2] - cellRect[0]) : (existing?.maxWidth || block.maxWidth);
+  let height = cellRect ? (cellRect[3] - cellRect[1]) : (existing?.maxHeight || block.maxHeight);
   const size = existing?.size || block.size;
   const family = existing?.fontFamily || block.fontFamily;
   const color = existing?.color || block.color;
@@ -1440,7 +1543,11 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
     const needed = (lines.length - 1) * leading + finalSize * 1.25;
     const maxHeight = Math.max(height, needed);
     const anchorX = (existing?.baseline || block.baseline)[0];
-    const maxWidth = clamp(width, 20, Math.max(20, doc.pageSizes[pageIndex].w - anchorX));
+    // Inside an area the replacement must not be allowed to run past the box,
+    // or its own text would spill over the unselected words next door.
+    const rightLimit = region ? region[2] - anchorX : doc.pageSizes[pageIndex].w - anchorX;
+    const minW = region ? 4 : 20;
+    const maxWidth = clamp(width, minW, Math.max(minW, rightLimit));
     await commitBlockEdit(pageIndex, block, text, {
       size: finalSize, color: fmt.color || color, maxWidth, maxHeight, fontFamily: finalFamily,
       align: fmt.align, bold: fmt.bold, italic: fmt.italic, underline: fmt.underline,
@@ -1449,7 +1556,7 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
       // wraps inside it and reports overset when the text cannot fit.
       ...(cell ? {
         mode: 'flow',
-        frames: [{ page: pageIndex, rect: cell.rect }],
+        frames: [{ page: pageIndex, rect: cellRect || cell.rect }],
         table: {
           id: cellHit.table.id, row: cell.row, col: cell.col,
           rows: cellHit.table.rows.length, cols: cellHit.table.cols.length,

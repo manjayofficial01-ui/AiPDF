@@ -39,6 +39,8 @@
     "test:overset": "node scripts/overset-badge-test.mjs",
     "test:direct": "node scripts/direct-edit-test.mjs",
     "test:arearegion": "node scripts/area-region-ocr-test.mjs",
+    "test:areaprecision": "node scripts/area-precision-test.mjs",
+    "test:areanative": "node scripts/area-native-precision-test.mjs",
     "test:modaldrag": "node scripts/modal-drag-test.mjs",
     "test:tbxdbl": "node scripts/textbox-tool-dblclick-test.mjs",
     "test:markup": "node scripts/markup-test.mjs",

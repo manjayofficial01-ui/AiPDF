@@ -32,14 +32,185 @@ const clampNum = (v, lo, hi) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, 
 
 /** True when `r`'s CENTRE lies inside `box`.
  *
- *  The Area Direct Edit marquee uses this, not plain intersection: a full row
- *  of text that runs past the box intersects it, and an intersection test
- *  makes the whole row editable — text the user never selected. A line is
- *  "in the area" when its middle is in the area. */
+ *  Kept for the OCR line gate (a neighbouring line that only grazes the box
+ *  must not join the area). It is NOT the Area Direct Edit text test any more:
+ *  whole pdf.js runs and whole OCR rows used to pass this and take their
+ *  outside words with them. Native text is now clipped glyph-by-glyph by
+ *  `clipTextContentToRegion`, and OCR rows word-by-word by
+ *  `flatOcrLinesInRegion`. */
 export function rectCentreInside(r, box) {
   if (!Array.isArray(r) || r.length !== 4 || !Array.isArray(box) || box.length !== 4) return false;
   const cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
   return cx >= box[0] && cx <= box[2] && cy >= box[1] && cy <= box[3];
+}
+
+/* ── Area Direct Edit: glyph-precise marquee clipping ─────────────────────
+ *
+ * pdf.js emits ONE TextItem per drawn run, and for most producers that run is
+ * a whole line ("This paragraph exists to be found …"). Testing the item's
+ * CENTRE against the marquee therefore makes the entire line editable as soon
+ * as the box covers its middle — the words to the left and right of the box
+ * included. That is the precision bug: "nearest text in line with the area".
+ *
+ * `clipTextContentToRegion` rebuilds the text content record so every item is
+ * either wholly inside the rectangle (kept verbatim, so truthful excision is
+ * still possible) or cut down to the CHARACTERS whose own glyph boxes are
+ * wholly inside it. Nothing outside the box reaches `groupTextBlocks`, so no
+ * block text, hit target or source operator can escape the marquee.
+ */
+
+/** True when `r` lies wholly inside `box`, with `tol` points of slack. */
+export function rectFullyInside(r, box, tol = 0) {
+  if (!Array.isArray(r) || r.length !== 4 || !Array.isArray(box) || box.length !== 4) return false;
+  if (!r.every(Number.isFinite) || !box.every(Number.isFinite)) return false;
+  return r[0] >= box[0] - tol && r[1] >= box[1] - tol
+    && r[2] <= box[2] + tol && r[3] <= box[3] + tol;
+}
+
+/** A rectangle `r` clipped to `box`, or null when they do not overlap. */
+export function rectClip(r, box) {
+  const c = [Math.max(r[0], box[0]), Math.max(r[1], box[1]),
+    Math.min(r[2], box[2]), Math.min(r[3], box[3])];
+  return (c[2] - c[0] > 0.25 && c[3] - c[1] > 0.25) ? c : null;
+}
+
+/** Axis-aligned bounds of a stretch of a text run, in the run's own rotated
+ *  frame. `from`/`to` are distances along the baseline, `low`/`high` offsets
+ *  along the stacking normal. */
+function runQuad(x, y, u, n, from, to, low, high) {
+  const p = (d, o) => [x + d * u[0] + o * n[0], y + d * u[1] + o * n[1]];
+  const pts = [p(from, low), p(to, low), p(to, high), p(from, high)];
+  return [Math.min(...pts.map((q) => q[0])), Math.min(...pts.map((q) => q[1])),
+    Math.max(...pts.map((q) => q[0])), Math.max(...pts.map((q) => q[1]))];
+}
+
+/* One measuring canvas for the whole page — creating one per text item made
+ * region repaints visibly slow on text-heavy pages. */
+let regionMeasureCtx = null;
+function charWidths(str, width, size, family, measure) {
+  const chars = Array.from(str);
+  let ws;
+  if (typeof measure === 'function') {
+    ws = chars.map((ch) => Math.max(0, Number(measure(ch, size, family)) || 0));
+  } else {
+    if (!regionMeasureCtx && typeof document !== 'undefined') {
+      try { regionMeasureCtx = document.createElement('canvas').getContext('2d'); } catch { /* Node: uniform fallback */ }
+    }
+    if (regionMeasureCtx) {
+      regionMeasureCtx.font = `${size}px ${family || 'Helvetica'}, Arial, sans-serif`;
+      ws = chars.map((ch) => Math.max(0.01, regionMeasureCtx.measureText(ch).width));
+    } else ws = chars.map(() => 1);
+  }
+  const sum = ws.reduce((a, b) => a + b, 0);
+  const k = sum > 0 ? width / sum : 0;
+  return { chars, ws: ws.map((w) => w * k) };
+}
+
+/**
+ * Rebuild `tc` so only glyphs inside `region` survive.
+ *
+ * Returns `{ tc, originMap, partial }`. `originMap[clippedIndex]` is the
+ * ORIGINAL item index (identity for excision and `editForBlock`); `partial[i]`
+ * means item `i` is a fragment of a longer source run, so the writer must use
+ * a cover rather than excising the operator — cutting the operator would erase
+ * the characters OUTSIDE the marquee that this edit does not own.
+ *
+ * `opts.measure(ch, size, family)` is an injection seam for offline tests; in
+ * the app the canvas measures with the run's own font and the result is scaled
+ * to the exact width pdf.js reported for the whole item.
+ */
+export function clipTextContentToRegion(tc, region, opts = {}) {
+  const items = [], originMap = [], partial = [];
+  const empty = { tc: { items, styles: tc?.styles || {} }, originMap, partial };
+  if (!tc || !Array.isArray(tc.items) || !Array.isArray(region) || region.length !== 4
+    || !region.every(Number.isFinite) || region[2] <= region[0] || region[3] <= region[1]) return empty;
+
+  const add = (item, src, isPartial) => {
+    items.push(item); originMap.push(src); partial.push(!!isPartial);
+  };
+
+  for (let index = 0; index < tc.items.length; index++) {
+    const it = tc.items[index];
+    if (!it || !it.str || !Array.isArray(it.transform) || it.transform.length < 6) continue;
+    if (it.dir === 'ttb') continue;                       // vertical writing: out of scope
+    const t = it.transform;
+    if (!Number.isFinite(t[4]) || !Number.isFinite(t[5])) continue;
+    const size = Math.hypot(t[2], t[3]);
+    if (!Number.isFinite(size) || size < 1.5) continue;  // invisible OCR layers
+    const angle = Math.atan2(t[1], t[0]);
+    const u = [Math.cos(angle), Math.sin(angle)];
+    const n = [-Math.sin(angle), Math.cos(angle)];
+    const x = t[4], y = t[5];
+    let width = Math.max(0, Number(it.width) || 0);
+    if (width < size * 0.08) {
+      const nChars = Array.from(it.str).filter((c) => !/\s/u.test(c)).length || 1;
+      width = nChars * size * 0.5;
+    }
+    const st = tc.styles?.[it.fontName] || {};
+    const asc = Number.isFinite(st.ascent) ? clampNum(st.ascent, 0.1, 1.6) : 0.9;
+    const desc = Number.isFinite(st.descent) ? clampNum(st.descent, -1.6, 0) : -0.21;
+    /* The INK band, a little tighter than the font's full ascent/descent: a
+     * marquee drawn snugly around visible glyphs must still count them as
+     * inside, while a box that only grazes the line above must not. */
+    const low = desc * size * 0.8, high = asc * size * 0.82;
+    const tol = Math.max(0.75, size * 0.08);
+    const whole = runQuad(x, y, u, n, 0, width, low, high);
+
+    if (rectFullyInside(whole, region, tol)) { add(it, index, false); continue; }
+    // RTL and single-glyph runs cannot be split by visual order. Keep them only
+    // when the whole run fits — never drag their outside half into the area.
+    if (it.dir === 'rtl' || Array.from(it.str).length < 2) continue;
+
+    const { chars, ws } = charWidths(it.str, width, size, st.fontFamily, opts.measure);
+    const starts = [];
+    let at = 0;
+    for (let c = 0; c < chars.length; c++) { starts[c] = at; at += ws[c]; }
+    const inside = chars.map((_ch, c) => rectFullyInside(
+      runQuad(x, y, u, n, starts[c], starts[c] + ws[c], low, high), region, tol));
+
+    // Consecutive inside characters form one fragment. Trim the whitespace at
+    // its edges so a cut through a gutter never creates a phantom " " block.
+    let c = 0;
+    while (c < chars.length) {
+      if (!inside[c]) { c++; continue; }
+      const s0 = c;
+      while (c < chars.length && inside[c]) c++;
+      let s = s0, e = c - 1;
+      while (e >= s && /^\s$/u.test(chars[e])) e--;
+      while (s <= e && /^\s$/u.test(chars[s])) s++;
+      /* A box drawn THROUGH a word leaves half a word inside it ("und," from
+       * "found,"). Half a word is not text the user selected — the region OCR
+       * path drops such fragments too — so snap both ends to whole words.
+       * Punctuation is deliberately NOT a word boundary: a box around "Hello"
+       * in "(Hello)" must keep the word. */
+      const isWord = (ch) => /[\p{L}\p{N}]/u.test(ch || '');
+      const rawS = s, rawE = e;
+      if (s <= e && s > 0 && isWord(chars[s - 1]) && isWord(chars[s])) {
+        while (s <= e && !/^\s$/u.test(chars[s])) s++;
+        while (s <= e && /^\s$/u.test(chars[s])) s++;
+      }
+      if (s <= e && e < chars.length - 1 && isWord(chars[e]) && isWord(chars[e + 1])) {
+        while (e >= s && !/^\s$/u.test(chars[e])) e--;
+        while (e >= s && /^\s$/u.test(chars[e])) e--;
+      }
+      while (e >= s && /^\s$/u.test(chars[e])) e--;
+      while (s <= e && /^\s$/u.test(chars[s])) s++;
+      // A very tight box can sit entirely INSIDE one word. Snapping would then
+      // leave nothing at all, which reads as a broken tool. In that case keep
+      // the literal characters the box covers — they are still strictly inside.
+      if (s > e) { s = rawS; e = rawE; }
+      if (s > e) continue;
+      const text = chars.slice(s, e + 1).join('');
+      const w = starts[e] + ws[e] - starts[s];
+      if (!text.trim() || !(w > 0)) continue;
+      const nt = t.slice();
+      nt[4] = x + starts[s] * u[0];
+      nt[5] = y + starts[s] * u[1];
+      add({ ...it, str: text, width: w, transform: nt, hasEOL: false,
+        __sourceIndex: index, __clip: [s, e + 1] }, index, true);
+    }
+  }
+  return { tc: { items, styles: tc.styles || {} }, originMap, partial };
 }
 
 /**
@@ -197,9 +368,16 @@ export function groupTextBlocks(tc, pageWidth = 595, only = null) {
  * PDF space has y increasing upward, canvas has it downward — hence the flip.
  */
 export function blocksFromOcrLines(lines, pageWidth, pageHeight, dpi = 200, pageIndex = 0, regionRect = null) {
-  let flat = flatOcrLines(lines, pageHeight, dpi);
-  // An active marquee keeps only the lines that really live in it.
-  if (regionRect) flat = flat.filter((l) => rectCentreInside([l.x, l.bottom, l.end, l.top], regionRect));
+  const flat = regionRect
+    ? flatOcrLinesInRegion(lines, pageHeight, dpi, regionRect)
+    : flatOcrLines(lines, pageHeight, dpi);
+  return blocksFromFlatOcrLines(flat, pageWidth, pageIndex);
+}
+
+/** Group an already-flattened (and possibly region-clipped) OCR line list into
+ *  editable blocks. Shared with the per-cell table split so both consume the
+ *  SAME word-trimmed lines — one path cannot quietly re-add outside words. */
+export function blocksFromFlatOcrLines(flat, pageWidth, pageIndex = 0) {
   if (!flat.length) return [];
 
   /* Snapping the raw estimates to the page's modal size is the difference
@@ -304,6 +482,68 @@ export function flatOcrLines(lines, pageHeight, dpi = 200) {
     });
   }
   return flat;
+}
+
+/** Word boxes of a flattened OCR line, in PDF points, left to right.
+ *
+ *  Region reads carry `pdfRect` on each word (converted through the render
+ *  viewport's inverse); whole-page Tesseract reads carry pixel `bbox`, which
+ *  is rescaled onto the line's own point span. Lines with no usable word boxes
+ *  (AI-vision OCR emits one line per cell) are treated as a single word — they
+ *  can only be kept whole, never silently widened. */
+function ocrWordRects(line) {
+  const raw = Array.isArray(line.words) ? line.words : [];
+  const pdf = raw.filter((w) => w && Array.isArray(w.pdfRect) && w.pdfRect.length === 4
+    && String(w.text || '').trim());
+  if (pdf.length) {
+    return pdf.sort((a, b) => a.pdfRect[0] - b.pdfRect[0]).map((w) => ({
+      x0: w.pdfRect[0], x1: w.pdfRect[2], text: String(w.text).trim(), raw: w,
+    }));
+  }
+  const bb = raw.filter((w) => w && w.bbox && String(w.text || '').trim());
+  if (bb.length) {
+    const minX = Math.min(...bb.map((w) => Number(w.bbox.x0) || 0));
+    const maxX = Math.max(...bb.map((w) => Number(w.bbox.x1) || 0));
+    const k = (line.end - line.x) / Math.max(1, maxX - minX);
+    return bb.sort((a, b) => a.bbox.x0 - b.bbox.x0).map((w) => ({
+      x0: line.x + ((Number(w.bbox.x0) || 0) - minX) * k,
+      x1: line.x + ((Number(w.bbox.x1) || 0) - minX) * k,
+      text: String(w.text).trim(), raw: w,
+    }));
+  }
+  return [{ x0: line.x, x1: line.end, text: String(line.text || '').trim(), raw: null }];
+}
+
+/**
+ * Flatten an OCR result for ONE marquee, at WORD precision.
+ *
+ * The line gate is the established centre-inside test (so a neighbouring line
+ * that only grazes the box never joins). What changes here is horizontal:
+ * a whole recognised line used to become editable as soon as its centre was
+ * inside, taking every word past the box edge with it. Now only words whose
+ * boxes are FULLY inside survive, and the line's text and geometry are rebuilt
+ * from exactly those words. A line with no word left in the box is dropped.
+ */
+export function flatOcrLinesInRegion(lines, pageHeight, dpi, region, tol = 1) {
+  if (!Array.isArray(region) || region.length !== 4) return flatOcrLines(lines, pageHeight, dpi);
+  const out = [];
+  for (const line of flatOcrLines(lines, pageHeight, dpi)) {
+    if (!rectCentreInside([line.x, line.bottom, line.end, line.top], region)) continue;
+    const kept = ocrWordRects(line).filter((w) => w.x1 > w.x0
+      && w.x0 >= region[0] - tol && w.x1 <= region[2] + tol);
+    if (!kept.length) continue;
+    const x = Math.max(region[0], Math.min(...kept.map((w) => w.x0)));
+    const end = Math.min(region[2], Math.max(...kept.map((w) => w.x1)));
+    const text = kept.map((w) => w.text).join(' ').replace(/\s+/gu, ' ').trim();
+    if (!text) continue;
+    out.push({
+      ...line, x, end, right: end, text,
+      words: kept.map((w) => w.raw).filter(Boolean),
+      // Geometry stops at the box, so a hit target can never sit outside it.
+      top: Math.min(line.top, region[3]), bottom: Math.max(line.bottom, region[1]),
+    });
+  }
+  return out;
 }
 
 /**
@@ -558,13 +798,27 @@ function finishBlock(g, pageWidth, kind, itemIndices, lineIds, pageIndex = 0) {
 export function editForBlock(doc, page, block) {
   const list = doc?.textEdits || [];
   if (!list.length) return undefined;
+  // An area edit owns a FRAGMENT of a source run; a whole-page edit owns the
+  // run. Their item indices overlap, so without this guard re-selecting an area
+  // would resolve to the whole-page edit (and vice versa) and wash the wrong box.
+  // Two DIFFERENT areas are separate scopes too: a marquee over the middle of
+  // a line and one over its end both clip down to "one item" and would share a
+  // key if the rectangle were not part of the identity.
+  const scopeKey = (o) => Array.isArray(o?.regionRect)
+    ? o.regionRect.map((v) => Number(v).toFixed(1)).join(',') : '';
+  const sameScope = (e) => e.page === page && scopeKey(e) === scopeKey(block);
   if (block.key) {
-    const byKey = list.find((e) => e.page === page && e.key === block.key);
+    const byKey = list.find((e) => e.key === block.key && sameScope(e));
     if (byKey) return byKey;
   }
-  if (!block.itemIndices?.length) return undefined;
+  /* The item-index fallback is a fuzzy identity for whole-page blocks only.
+   * Area blocks are fragments: several of them can map back to the SAME
+   * original show-text operator, so an index match here would resolve them
+   * all to whichever edit was committed first. Their key is exact. */
+  if (Array.isArray(block.regionRect) || !block.itemIndices?.length) return undefined;
   const ids = new Set(block.itemIndices);
-  return list.find((e) => e.page === page && e.itemIndices?.some((i) => ids.has(i)));
+  return list.find((e) => e.page === page && !e.regionRect
+    && e.itemIndices?.some((i) => ids.has(i)));
 }
 
 /* ── Cover + free-move model ─────────────────────────────────────────────

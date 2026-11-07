@@ -11,6 +11,9 @@ fast, local‑first desktop app.
 > (OpenAI, OpenRouter, Groq, Ollama, LM Studio…) and your documents are sent
 > only to the endpoint you choose.
 
+![AiPDF Editor — main window (light theme, v2.26.0)](screenshots/aipdf-editor.png)
+![AiPDF Editor — main window (dark theme, v2.26.0)](screenshots/aipdf-editor-dark.png)
+
 ---
 
 ## Features

@@ -291,6 +291,83 @@ check('high contrast restores the previous palette',
       await window.aipdf.run('view:highContrast');
       return JSON.stringify({ on: on, back: document.documentElement.dataset.skin });
     })()`)) === JSON.stringify({ on: 'contrast', back: 'graphite' }));
+/* ── Chrome bands: menu strip vs tool ribbon ──────────────────────────────
+   Both used to paint from --surface, so the two stacked rows read as one flat
+   sheet. They now use --chrome-menu / --chrome-toolbar, mixed from the ACTIVE
+   palette's accent. Prove the difference is real (not just a token rename),
+   subtle, palette-aware, and survives dark mode. */
+const rgbOf = (s) => {
+  if (typeof s !== 'string') return null;
+  let m = /^color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/.exec(s);
+  if (m) return [Number(m[1]), Number(m[2]), Number(m[3])];
+  m = /^rgba?\(([^)]+)\)/.exec(s);
+  if (m) {
+    const p = m[1].split(/[,\s/]+/).filter(Boolean).map(Number);
+    return p.slice(0, 3).map((v) => v / 255);
+  }
+  return null;
+};
+const chromeAt = async () => JSON.parse(await ev(`JSON.stringify({
+  skin: document.documentElement.dataset.skin,
+  mode: document.documentElement.dataset.theme,
+  menu: getComputedStyle(document.querySelector('.menubar')).backgroundColor,
+  ribbon: getComputedStyle(document.querySelector('.ribbon')).backgroundColor,
+  ribbonImage: getComputedStyle(document.querySelector('.ribbon')).backgroundImage
+})`));
+const skinQuiet = (id) => ev(`(async function(){
+  var p = await import('/js/premium.js');
+  p.setSkin(${JSON.stringify(id)}, true);
+  return document.documentElement.dataset.skin;
+})()`);
+const modeTo = (want) => ev(`(async function(){
+  var a = await import('/js/app.js');
+  if ((document.documentElement.dataset.theme === 'dark') !== ${want}) await a.onMenuAction('view:darkMode');
+  await new Promise(function(r){ setTimeout(r, 200); });
+  return document.documentElement.dataset.theme;
+})()`);
+const bandDelta = (c) => {
+  const m = rgbOf(c.menu), r = rgbOf(c.ribbon);
+  if (!m || !r) return -1;
+  return Math.max(...m.map((v, i) => Math.abs(v - r[i])));
+};
+
+const lightBands = [];
+for (const id of ['default', 'ocean', 'forest', 'amber', 'rose', 'violet', 'graphite', 'aurora']) {
+  await skinQuiet(id);
+  const c = await chromeAt();
+  lightBands.push({ id, delta: bandDelta(c), menu: c.menu, ribbon: c.ribbon });
+}
+check('menu and toolbar have distinct tints in every colour palette',
+  lightBands.every((x) => x.delta >= 0.012),
+  JSON.stringify(lightBands.map((x) => `${x.id}:${x.delta.toFixed(3)}`)));
+check('the tint difference stays subtle (no hard colour break)',
+  lightBands.every((x) => x.delta > 0 && x.delta <= 0.12),
+  JSON.stringify(lightBands.map((x) => `${x.id}:${x.delta.toFixed(3)}`)));
+check('each palette tints its own menu band',
+  new Set(lightBands.map((x) => x.menu)).size >= 7,
+  `${new Set(lightBands.map((x) => x.menu)).size} distinct colours`);
+check('the ribbon keeps a real vertical gradient between its two tokens',
+  /linear-gradient/.test((await chromeAt()).ribbonImage));
+
+await modeTo(true);
+const darkBands = [];
+for (const id of ['default', 'ocean', 'violet']) {
+  await skinQuiet(id);
+  darkBands.push({ id, delta: bandDelta(await chromeAt()) });
+}
+check('dark mode keeps the two bands distinct',
+  darkBands.every((x) => x.delta >= 0.012 && x.delta <= 0.12),
+  JSON.stringify(darkBands.map((x) => `${x.id}:${x.delta.toFixed(3)}`)));
+await modeTo(false);
+
+await skinQuiet('contrast');
+const hcBand = await chromeAt();
+const hcMenu = rgbOf(hcBand.menu), hcRibbon = rgbOf(hcBand.ribbon);
+check('high contrast stays pure white — its borders separate the bands',
+  !!hcMenu && !!hcRibbon && hcMenu.every((v) => v === 1) && hcRibbon.every((v) => v === 1),
+  `menu=${hcBand.menu} ribbon=${hcBand.ribbon}`);
+await skinQuiet('default');
+
 check('no renderer exceptions', exceptions.length === 0, exceptions.slice(0, 2).join(' | '));
 
 child.kill();

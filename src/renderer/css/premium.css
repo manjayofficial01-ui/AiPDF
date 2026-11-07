@@ -30,6 +30,17 @@
   --surface-raised:  #ffffff;
   --surface-sunken:  #f5f7fb;
 
+  /* Two stacked chrome bands, deliberately a few percent apart so the menu
+     strip and the tool ribbon read as separate layers instead of one flat
+     sheet. Both are mixed from the ACTIVE palette's accent, so all nine themes
+     and both light/dark modes inherit the difference with no per-theme rule.
+     The menu band carries a little more accent; the ribbon stays cleaner and
+     lighter, where the tool icons need the calmest possible background. */
+  --chrome-menu:        color-mix(in srgb, var(--surface) 90%, var(--accent));
+  --chrome-menu-low:    color-mix(in srgb, var(--surface-sunken) 92%, var(--accent));
+  --chrome-toolbar:     color-mix(in srgb, var(--surface) 96%, var(--accent));
+  --chrome-toolbar-low: color-mix(in srgb, var(--surface-sunken) 96%, var(--accent));
+
   --border:          #e3e8f0;
   --border-strong:   #cbd4e2;
   --border-control:  #9aa8bd;
@@ -220,6 +231,10 @@ html[data-skin="contrast"] {
   --page-shadow:0 0 0 2px #000;
   --danger:#000; --danger-ink:#000; --danger-soft:#ffe600; --ok:#000; --ok-ink:#000; --ok-soft:#ffe600;
   --warn:#000; --warn-ink:#000; --warn-soft:#ffe600;
+  /* Accessibility skin stays pure black/white; the black borders already
+     separate the bands, so no tint is needed here. */
+  --chrome-menu:#ffffff; --chrome-menu-low:#ffffff;
+  --chrome-toolbar:#ffffff; --chrome-toolbar-low:#ffffff;
 }
 html[data-skin="contrast"][data-theme="dark"] {
   --bg-app:#000000; --bg-sunken:#000000; --surface:#000000; --surface-raised:#000000; --surface-sunken:#000000;
@@ -235,6 +250,8 @@ html[data-skin="contrast"][data-theme="dark"] {
   --danger:#ffe600; --danger-ink:#ffe600; --danger-soft:#3a3500;
   --ok:#ffe600; --ok-ink:#ffe600; --ok-soft:#3a3500;
   --warn:#ffe600; --warn-ink:#ffe600; --warn-soft:#3a3500;
+  --chrome-menu:#000000; --chrome-menu-low:#000000;
+  --chrome-toolbar:#000000; --chrome-toolbar-low:#000000;
 }
 html[data-skin="contrast"] .brand-mark { color:#fff; }
 html[data-skin="contrast"][data-theme="dark"] .brand-mark { color:#000; }
@@ -380,7 +397,7 @@ body { font-feature-settings: "cv11" 1, "ss01" 1; }
 
 .titlebar {
   padding-left: 12px;
-  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);
+  background: linear-gradient(180deg, var(--chrome-menu) 0%, var(--chrome-menu-low) 100%);
   border-bottom: 1px solid var(--border);
   box-shadow: 0 1px 0 rgba(255,255,255,.6) inset;
 }
@@ -425,7 +442,7 @@ body { font-feature-settings: "cv11" 1, "ss01" 1; }
 .chip.on .dot, #aiChip.on .dot { background: var(--ok); }
 
 .menubar {
-  background: var(--surface);
+  background: var(--chrome-menu);
   border-bottom: 1px solid var(--border);
   gap: 8px;
 }
@@ -468,7 +485,11 @@ body { font-feature-settings: "cv11" 1, "ss01" 1; }
 /* ── 5. Ribbon ──────────────────────────────────────────────────────────── */
 
 .ribbon {
-  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);
+  /* Solid colour is kept as a real computed value (tests and any flat
+     override can read it); the gradient only supplies the gentle vertical
+     shading from the same two tokens. */
+  background-color: var(--chrome-toolbar);
+  background-image: linear-gradient(180deg, var(--chrome-toolbar) 0%, var(--chrome-toolbar-low) 100%);
   border-bottom: 1px solid var(--border-strong);
   padding: 7px 10px 6px;
   gap: 0;

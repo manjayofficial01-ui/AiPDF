@@ -14,6 +14,11 @@ fast, local‑first desktop app.
 ![AiPDF Editor — main window (light theme, v2.26.0)](screenshots/aipdf-editor.png)
 ![AiPDF Editor — main window (dark theme, v2.26.0)](screenshots/aipdf-editor-dark.png)
 
+> **🚀 Not a programmer? No problem.**
+> See the [**step-by-step installation guide**](INSTALL.md) — every click and
+> every command is written out for you, from downloading the ready-made
+> installer to a one-double-click start.
+
 ---
 
 ## Features
@@ -291,8 +296,12 @@ match Acrobat/Foxit muscle memory.
 
 ## Running
 
+> Beginners: follow [INSTALL.md](INSTALL.md) instead — it explains Node.js,
+> the ZIP download and the one-double-click launcher without assuming any
+> programming knowledge.
+
 ```bash
-npm install        # also runs scripts/vendor.js to verify pdf.js / pdf-lib assets
+npm install        # one-time setup of the dependencies
 npm start          # production‑like launch
 npm run dev        # launch with DevTools + verbose console
 ```

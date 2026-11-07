@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Double-clicking the Text box tool re-opens the selected box for typing.
  *
@@ -112,15 +113,21 @@ const ribbonPoint = (re) => evJson(`(function(){
   return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
 })()`);
 
+// The canonical fixture ships an AcroForm text field, which forms.js renders
+// as a <textarea> inside .formLayer on the page. Ignore those widgets: the
+// suite is counting inline TEXT BOX editors, not form inputs.
+const pageEditors = `Array.from(document.querySelectorAll('#pages textarea')).filter(function(t){ return !t.closest('.formLayer'); })`;
+
 const toolState = () => evJson(`(async function(){
   var st = await import('/js/store.js');
+  var tas = ${pageEditors};
   return JSON.stringify({
     tool: st.state.tool,
     writeMode: !!st.state.textWriteMode,
     cursor: document.getElementById('pages').style.cursor,
     selection: st.state.selection.slice(),
-    editors: document.querySelectorAll('#pages textarea').length,
-    editorText: (document.querySelector('#pages textarea') || {}).value || null,
+    editors: tas.length,
+    editorText: (tas[0] || {}).value || null,
   });
 })()`);
 
@@ -143,7 +150,7 @@ await sleep(600);
 s = await toolState();
 check('a page click creates a box and opens its editor', s && s.editors === 1, s && `editors=${s.editors}`);
 
-await ev(`(function(){ var t = document.querySelector('#pages textarea'); if (!t) return false; t.value = 'Box one'; t.dispatchEvent(new Event('input', { bubbles: true })); t.blur(); return true; })()`);
+await ev(`(function(){ var t = (${pageEditors})[0]; if (!t) return false; t.value = 'Box one'; t.dispatchEvent(new Event('input', { bubbles: true })); t.blur(); return true; })()`);
 await sleep(500);
 const boxInfo = await evJson(`(async function(){
   var st = await import('/js/store.js');
@@ -170,7 +177,7 @@ check('double-clicking the Text box tool re-opens the selected box', s && s.edit
 check('the re-opened editor carries the box text', s && s.editorText === 'Box one', s && JSON.stringify(s.editorText));
 
 // Close it (blur commits).
-await ev(`(function(){ var t = document.querySelector('#pages textarea'); if (t) t.blur(); return true; })()`);
+await ev(`(function(){ var t = (${pageEditors})[0]; if (t) t.blur(); return true; })()`);
 await sleep(400);
 
 /* ── 3. Nothing selected: double-click arms the writing cursor ──────────── */

@@ -56,7 +56,12 @@ export function renderSidebarChrome() {
   document.querySelectorAll('.rail-btn').forEach((b) => {
     b.classList.toggle('active', settings.sidebarOpen && b.dataset.panel === settings.sidebar);
   });
-  const titles = { pages: 'Pages', bookmarks: 'Bookmarks', comments: 'Comments', search: 'Search', forms: 'Form fields', ocr: 'OCR — scanned pages', fonts: 'Document fonts', attachments: 'Attachments', signatures: 'Signatures', layers: 'Layers' };
+  const titles = {
+    pages: 'Pages', bookmarks: 'Bookmarks', comments: 'Comments', search: 'Search',
+    forms: 'Form fields', ocr: 'OCR — scanned pages', fonts: 'Document fonts',
+    attachments: 'Attachments', signatures: 'Signatures', layers: 'Layers',
+    assurance: 'Assurance', timeline: 'Version Timeline',
+  };
   $('#sideTitle').textContent = titles[settings.sidebar] || 'Panel';
 }
 
@@ -69,6 +74,14 @@ export function renderSidebar() {
   tools.innerHTML = '';
   if (!doc || !settings.sidebarOpen) { renderSidebarChrome(); return; }
   renderSidebarChrome();
+  // Late-registered panels (Assurance / Version Timeline) live in their own
+  // modules. They register through a global table at boot so this file does
+  // not have to import them — that would create an app.js ↔ sidebar cycle.
+  const extra = window.__aipdfSidePanels && window.__aipdfSidePanels[settings.sidebar];
+  if (typeof extra === 'function') {
+    extra(body, tools);
+    return;
+  }
   ({ pages: renderThumbs, bookmarks: renderBookmarks, comments: renderComments, search: renderSearchPanel, forms: renderFormsPanel, ocr: renderOcrPanel, fonts: renderFontsPanel, attachments: renderAttachments, signatures: renderSignatures, layers: renderLayers }[settings.sidebar] || renderThumbs)();
 }
 

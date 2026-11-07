@@ -126,15 +126,20 @@ function saveSettings(s) {
 /** Rebuild the native menu from current settings. The Open Recent submenu is
  *  built by hand because the `recentDocuments` role is macOS-only and renders
  *  inert on Windows, so it has to be refreshed whenever recents change. */
+let lastMenuSkin = null;
 function rebuildMenu() {
   if (!win) return;
   const s = loadSettings();
+  const st = s.settings && typeof s.settings === 'object' ? s.settings : {};
+  // View > Colour Theme uses radio items, so the built menu has to know the
+  // palette the renderer currently has applied.
+  lastMenuSkin = st.skin || 'default';
   Menu.setApplicationMenu(
     buildMenu(
       (action, payload) => {
         if (win) win.webContents.send('menu:action', action, payload);
       },
-      { recents: Array.isArray(s.recents) ? s.recents : [] }
+      { recents: Array.isArray(s.recents) ? s.recents : [], skin: lastMenuSkin }
     )
   );
 }
@@ -796,7 +801,11 @@ ipcMain.handle('store:set', (_e, key, value) => {
   const s = loadSettings();
   s[key] = value;
   saveSettings(s);
+  // Rebuild only for things the menu actually renders. Settings are written
+  // on many unrelated changes, so guard on the palette to avoid rebuilding
+  // the whole application menu on every keystroke-driven setting write.
   if (key === 'recents') rebuildMenu();
+  else if (key === 'settings' && value && value.skin !== lastMenuSkin) rebuildMenu();
   return true;
 });
 

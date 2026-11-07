@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Verify that a text box produced by the Direct Editor is moveable and
  * resizable, the same as a regular Text Box annotation.

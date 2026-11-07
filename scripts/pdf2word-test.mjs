@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * PDF → Word (AI) — the converter ported from `pdf2word-max`.
  *

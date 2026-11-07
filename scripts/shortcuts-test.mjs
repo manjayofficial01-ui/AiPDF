@@ -1,10 +1,13 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Live verification of the universal tool access and the standard shortcuts.
  *
  *   node scripts/shortcuts-test.mjs
  */
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,9 +16,13 @@ const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.e
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9551;
 
+// Per-run userData: the shared profile can keep the renderer stuck mid-boot
+// and makes consecutive runs depend on each other's persisted state.
+const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-shortcuts-test-'));
+
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
+const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 
@@ -227,6 +234,23 @@ const blk = await ev(`(function(){
 if (blk) {
   await click(blk.x, blk.y);
   await sleep(500);
+  // Direct Editor asks for the detected text BEFORE it opens the inline
+  // surface. Skipping that question leaves a modal open and no text input,
+  // so every "while typing" assertion below measures the wrong focus.
+  if (await ev(`!!document.querySelector('.de-ask-text')`)) {
+    const accepted = await ev(`(function(){
+      var m = document.querySelector('.modal');
+      var b = m && m.querySelector('button.primary');
+      if (b) { b.click(); return true; }
+      return false;
+    })()`);
+    if (!accepted) {
+      await ev(`document.querySelector('.de-ask-text').focus()`);
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+    }
+    await sleep(600);
+  }
   const open = await ev(`!!document.querySelector('.direct-editor-surface')`);
   check('the Direct Editor is open for the focus test', open === true);
 

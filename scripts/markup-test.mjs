@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Live verification of the text-markup tools (Highlight, Underline, StrikeOut,
  * Squiggly). These are text-selection tools: arm from the ribbon, drag across

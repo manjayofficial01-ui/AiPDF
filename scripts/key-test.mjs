@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Keyboard test — presses real key events through CDP and observes the app.
  *
@@ -17,6 +18,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from "node:os";
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,8 +29,9 @@ const PORT = 9416;
 // Find box) and the user's live settings (remembered tool, open search panel
 // and its autofocus) would legitimately differ. Every other live gate
 // isolates the same way.
-const UD = path.join(ROOT, '.smoke', 'keytest-ud');
-fs.rmSync(UD, { recursive: true, force: true });
+// Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
+// trip the safe-delete bulk guard; they also inherit another suite settings.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-key-test-ud-"));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;

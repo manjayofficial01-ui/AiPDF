@@ -1,7 +1,8 @@
 /**
  * Generates a fixture PDF used by the headless functional test.
- * It contains: 2 pages of extractable text, a real Highlight annotation
- * (with appearance stream), and a text form field.
+ * It contains: 3 pages of extractable text, a real Highlight annotation
+ * (with appearance stream), and a text form field. The third page keeps the
+ * PDF-to-Word multi-page regression honest: it converts pages [0,1,2].
  * Run: node scripts/make-fixtures.mjs
  */
 import * as PL from '@cantoo/pdf-lib';
@@ -59,6 +60,11 @@ tf.setText('Ada Lovelace');
 // Page 2
 const page2 = doc.addPage([595.28, 841.89]);
 page2.drawText('Second page content for extraction.', { x: 50, y: 760, size: 14, font, color: rgb(0, 0, 0) });
+
+// Page 3 — required by the PDF-to-Word whole-file conversion test, which
+// requests three pages and asserts one table plus two page breaks.
+const page3 = doc.addPage([595.28, 841.89]);
+page3.drawText('Third page content for multi-page conversion.', { x: 50, y: 760, size: 14, font, color: rgb(0, 0, 0) });
 
 const bytes = await doc.save({ useObjectStreams: true });
 const fixturePath = path.join(out, 'fixture.pdf');

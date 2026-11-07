@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Icon audit — finds every rendered UI icon that is invisible.
  *
@@ -17,6 +18,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,9 +27,13 @@ const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.e
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9414;
 
+// Per-run userData: the shared profile can keep the renderer stuck mid-boot
+// and makes consecutive runs depend on each other's persisted state.
+const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-icon-audit-'));
+
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE; // would make require('electron') return the Node binding
-const child = spawn(ELECTRON, ['.', `--remote-debugging-port=${PORT}`, FIXTURE], { cwd: ROOT, env: childEnv });
+const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`, FIXTURE], { cwd: ROOT, env: childEnv });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 
@@ -91,6 +97,12 @@ const report = await ev(`(function(){
     for (var k = 0; k < paths.length; k++) totalD += (paths[k].getAttribute('d') || '').length;
     out.push({
       label: label,
+      // A closed findbar / hidden welcome strip / collapsed panel has SVGs in
+      // the DOM with a 0x0 rect because an ANCESTOR is display:none. Those are
+      // intentionally not on screen; only rendered SVGs can be invisible bugs.
+      // getClientRects() is empty for display:none, but still has one (possibly
+      // zero-sized) rect for a broken icon that IS laid out.
+      rendered: s.getClientRects().length > 0,
       cls: (btn && btn.className) || (host && host.className) || '',
       id: (btn && btn.id) || (host && host.id) || '',
       w: Math.round(r.width), h: Math.round(r.height),
@@ -103,9 +115,11 @@ const report = await ev(`(function(){
 })()`);
 
 const icons = JSON.parse(report);
-console.log('total chrome <svg> icons: ' + icons.length);
+const hidden = icons.filter((i) => !i.rendered).length;
+console.log('total chrome <svg> icons: ' + icons.length + ' (' + hidden + ' in hidden panels, skipped)');
 
 function invisible(ic) {
+  if (!ic.rendered) return [];
   const reasons = [];
   const fillNone = ic.fill === 'none' || ic.fill === 'rgba(0, 0, 0, 0)';
   const strokeNone = ic.stroke === 'none' || ic.stroke === 'rgba(0, 0, 0, 0)';

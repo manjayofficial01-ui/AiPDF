@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Verified AI editing — the plan, the approval gate, and the proof.
  *
@@ -21,16 +22,19 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
+import os from 'node:os';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9472;
-const UD = path.join(ROOT, '.smoke', 'editplan-test-ud');
+// A fresh profile per run. Never delete a fixed .smoke/ profile: the
+// safe-delete shim routes recursive deletes to the OS trash and fails closed
+// once a Chromium profile grows past ~50 files, which aborted this suite.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-editplan-ud-'));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-fs.rmSync(UD, { recursive: true, force: true });
 const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
@@ -72,7 +76,11 @@ await send('Page.bringToFront').catch(() => {});
 const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
 
-const PAGE = 4;
+// The canonical fixture from make-fixtures.mjs carries the "functional test
+// fixture" sentence on its FIRST page. Older runs used a drifted 4-page
+// save-over file; pinning the test to that artifact made it fail whenever the
+// fixture guard restored the real document.
+const PAGE = 1;
 const booted = await evJson(`(async function(){
   var st = await import('/js/store.js');
   st.settings.ai = Object.assign({}, st.settings.ai, {
@@ -115,7 +123,7 @@ await ev(`(async function(){
             { op: 'delete_pages', pages: '1-${booted.pages}' },
             { op: 'polish_the_prose', page: ${PAGE} },
           ],
-          uncertainties: ['The date on page 4 may need checking against page 1.'],
+          uncertainties: ['The date on page 1 may need checking against the source.'],
         } },
       ] };
     }

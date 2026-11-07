@@ -37,6 +37,7 @@ import {
   posterTiles, singlePagePlan, splitBySizePlan, chunkByCount, autoRenameSuggest,
   repairCheck, PAGE_NUMBER_FORMATS, pageNumberPlan, autoRotatePlan,
   attachmentOps, unlockFormsPlan, PIPELINE_STEPS, validatePipeline, runPipelineModel,
+  pipelineStamps,
 } from './stirling.js';
 import { zipStore } from './zip.js';
 import { convertPdfToWord, docxSelfTest } from './pdf2word.js';
@@ -44,6 +45,12 @@ import { $, el, toast, formatBytes, hexToRgb, rgbToHex, rgbToCss, clamp, initToo
 import { svgIcon } from './icons.js';
 import { showModal, confirmDialog, alertDialog, promptDialog, formRow, contextMenu } from './dialog.js';
 import { openSettingsDialog } from './settings.js';
+// Document Assurance + local version timeline + premium visual state. These
+// only reach back into app.js through dynamic imports inside action handlers,
+// so there is no module-evaluation cycle.
+import { initAssurance, openSecurityInspector, openAccessibilityChecker, openTrustCenter, flattenAndSanitize, applyAccessibilityFixes } from './assurance.js';
+import { openTimeline, createCheckpoint, snapshotOnSave, snapshotOnOpen } from './timeline.js';
+import { initPremium, toggleFocusMode, toggleHighContrast, cycleSkin, setSkin, openThemeGallery } from './premium.js';
 
 // Ribbon tabs, in Foxit's order: Home, View, Comment, Edit, Organize,
 // Protect, Convert, Forms — with AI as our own final tab. (View and Convert
@@ -54,7 +61,7 @@ import { openSettingsDialog } from './settings.js';
 // overlay, compress, flatten, N-up, booklet, poster, page numbers, split by
 // size, auto-rename, repair, attachments — were reachable ONLY from the
 // Windows menu bar. A feature you cannot see is a feature nobody uses.
-const MODES = ['Home', 'View', 'Comment', 'Edit', 'Organize', 'Protect', 'Documents', 'Convert', 'Forms', 'AI'];
+const MODES = ['Home', 'View', 'Comment', 'Edit', 'Organize', 'Protect', 'Documents', 'Assurance', 'Convert', 'Forms', 'AI'];
 let mode = 'Home';
 let bootInfo = null;
 
@@ -95,6 +102,11 @@ async function boot() {
   wireGlobal();
   initTooltips();
   initContextMenus();
+  // Register the Assurance / Timeline side panels before the first
+  // renderSidebar(), then apply skins, focus mode, welcome enhancements and
+  // the local `window.aipdf` automation surface.
+  initAssurance();
+  initPremium();
   renderAIDockIfNeeded();
   updateStatus();
 
@@ -1040,6 +1052,8 @@ function buildChrome() {
     ['layers', 'Layers', 'layers'],
     ['ocr', 'OCR — scanned pages', 'scan'],
     ['fonts', 'Document fonts', 'font'],
+    ['assurance', 'Assurance — security & accessibility', 'shield'],
+    ['timeline', 'Version Timeline — local history', 'clock'],
     ['ai', 'AI assistant', 'ai'],
   ];
   railItems.forEach(([panel, title, icon]) => {
@@ -1323,7 +1337,34 @@ function ribbonGroupsForMode() {
         { icon: 'readAloud', label: 'Read aloud', act: () => onMenuAction('view:readAloud') },
         { icon: 'settings', label: 'Read aloud settings…', act: () => onMenuAction('view:ttsSettings') },
         { icon: 'present', label: 'Present', act: () => togglePresentation() },
+        { icon: 'eye', label: 'Focus mode', act: () => onMenuAction('view:focus'), active: () => !!state.view.focusMode },
+        { icon: 'palette', label: 'Colour themes…', act: () => onMenuAction('view:themeGallery') },
+        { icon: 'palette', label: 'Cycle theme', act: () => onMenuAction('view:cycleSkin') },
+        { icon: 'accessibility', label: 'High contrast', act: () => onMenuAction('view:highContrast') },
         { icon: state.view.dark ? 'sun' : 'moon', label: state.view.dark ? 'Light' : 'Dark', act: () => { settings.theme = state.view.dark ? 'light' : 'dark'; applyTheme(); saveSettings(); renderRibbon(); } },
+      ] },
+    ];
+    // Document Assurance: offline forensics, PDF/UA auditing, verifiable
+    // local-first posture and recoverable version history. This is the
+    // category the market leaders charge a compliance tier for; here it is
+    // a first-class ribbon tab with no account and no upload.
+    case 'Assurance': return [
+      { title: 'Inspect', style: 'large', items: [
+        { icon: 'shield', label: 'Security Inspector', act: () => onMenuAction('assurance:inspect') },
+        { icon: 'accessibility', label: 'Accessibility Checker', act: () => onMenuAction('assurance:accessibility') },
+      ] },
+      { title: 'Repair', items: [
+        { icon: 'compress', label: 'Flatten & Sanitize', act: () => onMenuAction('assurance:sanitize') },
+        { icon: 'accessibility', label: 'Apply safe a11y fixes', act: () => onMenuAction('assurance:a11yFix') },
+      ] },
+      { title: 'History', items: [
+        { icon: 'clock', label: 'Version Timeline', act: () => onMenuAction('assurance:timeline') },
+        { icon: 'plus', label: 'New checkpoint', act: () => onMenuAction('assurance:checkpoint') },
+      ] },
+      { title: 'Verify', items: [
+        { icon: 'lock', label: 'Trust Center', act: () => onMenuAction('assurance:trust') },
+        { icon: 'shield', label: 'Assurance panel', act: () => onMenuAction('view:assurance') },
+        { icon: 'clock', label: 'Timeline panel', act: () => onMenuAction('view:timeline') },
       ] },
     ];
     // Convert is a first-class Foxit tab (To Office / To Other). We expose the
@@ -2036,6 +2077,9 @@ async function afterLoad(doc) {
   renderRibbon();
   renderContext();
   updateStatus();
+  // Baseline version: the file exactly as it was opened. Without it a user
+  // who saves once has nothing to roll back to in the local timeline.
+  snapshotOnOpen(doc);
   doc.history = [];
   doc.hIndex = -1;
   pushHistory('open');
@@ -2224,6 +2268,9 @@ export async function saveDoc(doc = activeDoc()) {
     if (!res.ok) throw new Error(res.error);
     doc.bytes = bytes;
     doc.redactionProof = null;
+    // Local version history is fire-and-forget: a timeline failure must never
+    // turn a successful save into a failure.
+    snapshotOnSave(doc, bytes);
     setClean(doc);
     renderTabs();
     updateStatus();
@@ -2255,6 +2302,7 @@ export async function saveDocAs(doc = activeDoc()) {
     doc.name = path.split(/[\\/]/).pop();
     doc.bytes = bytes;
     doc.redactionProof = null;
+    snapshotOnSave(doc, bytes);
     setClean(doc);
     addRecent(path, doc.name);
     window.api.setRepresented(path);
@@ -3165,19 +3213,43 @@ async function automateDialog() {
   const doc = activeDoc();
   if (!doc) return;
   const picked = [];
+  const paramFor = {};
   const ok = await showModal({
     title: 'Automate — run tools as a pipeline',
     width: '',
     body: (b) => {
-      b.appendChild(el('div', { class: 'hint', text: 'Tick tools to run in order. Raster steps rebuild pages as images; sanitize strips attachments/metadata.' }));
+      b.appendChild(el('div', { class: 'hint', text: 'Tick tools to run in order. Every step is committed into one rebuilt file; Split by size then exports the parts. Raster steps rebuild pages as images, so their text stops being selectable.' }));
       for (const s of PIPELINE_STEPS) {
         const c = el('input', { type: 'checkbox' });
+        let paramNode = null;
         c.onchange = () => {
           const i = picked.indexOf(s.id);
           if (c.checked && i < 0) picked.push(s.id);
           if (!c.checked && i >= 0) picked.splice(i, 1);
+          if (paramNode) paramNode.disabled = !c.checked;
         };
         b.appendChild(el('label', { class: 'cb' }, [c, el('span', { text: s.label })]));
+        // Steps with a parameter used to run on a hardcoded default with no way
+        // to change it. Collect it next to the checkbox that enables the step.
+        if (s.id === 'compress') {
+          paramNode = el('select', {}, COMPRESS_PRESETS.map((p) => el('option', { value: p.id, text: p.label })));
+          paramNode.value = 'balanced';
+          paramFor[s.id] = () => ({ presetId: paramNode.value });
+        } else if (s.id === 'addPageNumbers') {
+          paramNode = el('select', {}, PAGE_NUMBER_FORMATS.map((f) => el('option', { value: f.id, text: f.label })));
+          paramNode.value = 'n-of-N';
+          paramFor[s.id] = () => ({ formatId: paramNode.value });
+        } else if (s.id === 'watermark') {
+          paramNode = el('input', { type: 'text', value: 'DRAFT' });
+          paramFor[s.id] = () => ({ text: paramNode.value.trim() });
+        } else if (s.id === 'splitSize') {
+          paramNode = el('input', { type: 'number', value: '5', min: '0.5', max: '100', step: '0.5', style: { width: '90px' } });
+          paramFor[s.id] = () => ({ targetMB: clamp(Number(paramNode.value) || 5, 0.5, 100) });
+        }
+        if (paramNode) {
+          paramNode.disabled = true;
+          b.appendChild(formRow(s.id === 'splitSize' ? 'MB per part' : 'Option', paramNode).row);
+        }
       }
     },
     buttons: [
@@ -3186,31 +3258,90 @@ async function automateDialog() {
     ],
   });
   if (!ok || !picked.length) return;
-  const steps = picked.map((id) => ({ id }));
+  const steps = picked.map((id) => (paramFor[id] ? { id, params: paramFor[id]() } : { id }));
   const v = validatePipeline(steps);
   if (!v.ok) return toast(v.issues.join('; '), 'err');
   setBusy(true, 'Running pipeline…');
   try {
     const r = runPipelineModel(doc, steps);
-    // Execute queued writer steps in a fixed, safe order.
-    if (doc.pipelineFlags?.removeBlanks && doc.numPages > 1) {
+    const flags = doc.pipelineFlags || {};
+    const done = [];
+    // Structural first: later steps measure against the surviving page count.
+    if (flags.removeBlanks && doc.numPages > 1) {
       const blank = [];
       for (let i = 0; i < doc.numPages; i++) blank.push(await isPageBlank(doc, i));
+      const before = doc.numPages;
       removeBlankPages(doc, blank);
+      done.push(`removed ${before - doc.numPages} blank page(s)`);
     }
-    if (doc.pipelineFlags?.compress) {
-      const plan = planCompress({ ...(doc.pipelineFlags.compress || {}), pageCount: doc.numPages });
+    // Raster steps. rasterizePages() replaces an existing raster item, so the
+    // last one wins for dpi/filter — flatten runs before compress/grayscale.
+    if (flags.flatten) {
+      const fp = flattenPlan({
+        pageCount: doc.numPages, annots: doc.annots || [],
+        hasForm: (doc.fields || []).length > 0 || (doc.newFields || []).length > 0,
+      });
+      if (fp.pages.length) {
+        rasterizePages(doc, fp.pages, '', 200);
+        for (const it of doc.pageOps?.items || []) {
+          if (it && (it.t === 'raster' || it.t === 'scaled-raster')) it.quality = 0.9;
+        }
+      }
+      done.push('flattened');
+    }
+    if (flags.compress) {
+      const plan = planCompress({ ...(flags.compress || {}), pageCount: doc.numPages });
       doc.compressQuality = plan.quality;
       rasterizePages(doc, plan.pages, plan.filter, plan.dpi);
+      done.push('compressed');
     }
-    if (doc.pipelineFlags?.grayscale) {
+    if (flags.grayscale) {
       rasterizePages(doc, allPages(doc.numPages), 'grayscale(1)', 150);
+      done.push('grayscale');
     }
-    const out = await buildPdf(doc, { sanitize: picked.includes('sanitize'), flattenForm: picked.includes('flatten') });
-    await reloadDocFromBytes(doc, out, `Pipeline: ${r.applied.join(' · ')}`);
+    // Page numbers and watermark are real PDF stamps. They are appended only
+    // for this one buildPdf() pass, so a later save cannot write them twice.
+    const stamps = pipelineStamps(flags, doc.numPages);
+    const keepStamps = doc.stamps || [];
+    doc.stamps = [...keepStamps, ...stamps];
+    let out;
+    try {
+      out = await buildPdf(doc, { sanitize: picked.includes('sanitize'), flattenForm: !!flags.flatten });
+    } finally {
+      doc.stamps = keepStamps;
+    }
+    if (stamps.some((s) => s.id.startsWith('pipeline-pn-'))) done.push(`numbered ${doc.numPages} page(s)`);
+    if (stamps.some((s) => s.kind === 'watermark')) done.push('watermarked');
+    if (picked.includes('sanitize')) done.push('sanitized');
+    await reloadDocFromBytes(doc, out, `Pipeline: ${done.join(' · ') || r.applied.join(' · ')}`);
     doc.pipelineFlags = null;
+    // Split-by-size is an export, not a document edit: it runs on the rebuilt
+    // bytes so the parts contain every step above.
+    if (flags.splitSize) {
+      const targetMB = clamp(Number(flags.splitSize.targetMB) || 5, 0.5, 100);
+      const plan = splitBySizePlan(doc.bytes?.length || 0, doc.numPages, targetMB);
+      if (plan.chunks.length < 2) {
+        toast('Already under that size — nothing to split.', 'ok');
+      } else {
+        let written = 0;
+        for (let k = 0; k < plan.chunks.length; k++) {
+          const bytes = await buildExtract(doc, plan.chunks[k]);
+          const dest = await window.api.saveDialog({
+            defaultPath: `${(doc.name || 'document').replace(/\.pdf$/i, '')}-part${k + 1}.pdf`,
+          });
+          if (!dest) break;
+          await window.api.writeFile(dest, bytes);
+          written++;
+        }
+        done.push(`split into ${written}/${plan.chunks.length} part(s)`);
+        toast(`Pipeline exported ${written} of ${plan.chunks.length} part(s)`, 'ok');
+      }
+    }
     if (r.skipped.length) toast('Skipped: ' + r.skipped.join(', '), 'warn');
   } catch (e) {
+    // Never leave half a queue behind: a later run would re-apply the steps
+    // that already succeeded against a document that was never rebuilt.
+    doc.pipelineFlags = null;
     toast('Pipeline failed: ' + (e?.message || e), 'err');
   } finally {
     setBusy(false);
@@ -4850,7 +4981,9 @@ function toggleFind(force) {
 
 /* ══ Command palette ════════════════════════════════════════════════════ */
 
-const COMMANDS = [
+/** Exported so the local `window.aipdf` agent surface can enumerate the real
+ *  command table instead of maintaining a second, drift-prone copy. */
+export const COMMANDS = [
   ['File', 'Open…', 'open', 'file:open'],
   ['File', 'Save', 'save', 'file:save'],
   ['File', 'Save As…', 'save', 'file:saveAs'],
@@ -4873,6 +5006,19 @@ const COMMANDS = [
   ['View', 'Read aloud settings…', 'settings', 'view:ttsSettings'],
   ['View', 'Toggle dark mode', 'moon', 'view:darkMode'],
   ['View', 'Presentation mode', 'present', 'view:presentation'],
+  ['View', 'Focus mode', 'eye', 'view:focus'],
+  ['View', 'Cycle appearance', 'palette', 'view:cycleSkin'],
+  ['View', 'High contrast', 'accessibility', 'view:highContrast'],
+  ['View', 'Colour themes — open gallery', 'palette', 'view:themeGallery'],
+  ['View', 'Colour theme: Slate Indigo', 'palette', 'view:theme:default'],
+  ['View', 'Colour theme: Ocean Teal', 'palette', 'view:theme:ocean'],
+  ['View', 'Colour theme: Forest Emerald', 'palette', 'view:theme:forest'],
+  ['View', 'Colour theme: Amber Ember', 'palette', 'view:theme:amber'],
+  ['View', 'Colour theme: Rose Quartz', 'palette', 'view:theme:rose'],
+  ['View', 'Colour theme: Violet Ink', 'palette', 'view:theme:violet'],
+  ['View', 'Colour theme: Graphite', 'palette', 'view:theme:graphite'],
+  ['View', 'Colour theme: Aurora', 'palette', 'view:theme:aurora'],
+  ['View', 'Colour theme: High Contrast', 'accessibility', 'view:theme:contrast'],
   ['Comment', 'Highlight', 'highlight', 'tool:highlight'],
   ['Comment', 'Underline', 'underline', 'tool:underline'],
   ['Comment', 'Strikethrough', 'strikeout', 'tool:strikeout'],
@@ -4929,6 +5075,15 @@ const COMMANDS = [
   ['AI', 'Contract review…', 'file', 'ai:contract'],
   ['AI', 'Document outline', 'book', 'ai:outline'],
   ['AI', 'AI settings', 'settings', 'ai:settings'],
+  ['Assurance', 'Security Inspector', 'shield', 'assurance:inspect'],
+  ['Assurance', 'Accessibility Checker', 'accessibility', 'assurance:accessibility'],
+  ['Assurance', 'Flatten & Sanitize', 'compress', 'assurance:sanitize'],
+  ['Assurance', 'Apply safe accessibility fixes', 'accessibility', 'assurance:a11yFix'],
+  ['Assurance', 'Version Timeline', 'clock', 'assurance:timeline'],
+  ['Assurance', 'New checkpoint', 'plus', 'assurance:checkpoint'],
+  ['Assurance', 'Trust Center', 'lock', 'assurance:trust'],
+  ['Assurance', 'Open Assurance panel', 'shield', 'view:assurance'],
+  ['Assurance', 'Open Version Timeline panel', 'clock', 'view:timeline'],
   ['Export', 'Export text…', 'download', 'export:text'],
   ['Export', 'Export pages as images…', 'image', 'export:images'],
   ['Export', 'Export comments…', 'comments', 'export:comments'],
@@ -5513,7 +5668,9 @@ function noteRecentCommand(action) {
   saveSettings();
 }
 
-async function onMenuAction(action, payload) {
+/** The single dispatch point for menus, ribbon, palette, quick access and the
+ *  local agent API. Exported for `window.aipdf.run(action)`. */
+export async function onMenuAction(action, payload) {
   noteRecentCommand(action);
   const doc = activeDoc();
   switch (action) {
@@ -5698,10 +5855,10 @@ async function onMenuAction(action, payload) {
     case 'tool:brush': case 'tool:highlighter': case 'tool:formatPainter': case 'tool:eyedropper':
     case 'tool:eraser': case 'tool:stamp': case 'tool:image': case 'tool:signature':
     case 'tool:redact': case 'tool:whiteout': case 'tool:measure': case 'tool:editText':
-    case 'tool:editArea':
-    // Vertex + rounded shape tools have no native menu items today (the ribbon
-    // buttons call setTool directly) but must stay dispatchable so the action
-    // bus, command palette and future menu entries reach the same tools.
+    case 'tool:editArea': case 'tool:editImage':
+    // Vertex + rounded shape tools are also listed in the native Tools menu;
+    // grouped here so the ribbon, menu, palette and agent API all reach the
+    // exact same setTool() path.
     case 'tool:roundRect': case 'tool:polygon': case 'tool:polyline': case 'tool:cloud':
     case 'tool:areaHighlight':
     case 'tool:caret': case 'tool:measureArea':
@@ -5871,6 +6028,27 @@ async function onMenuAction(action, payload) {
     case 'ai:contract': await runContractReview(); break;
     case 'ai:smartredact': await openSmartRedact(); break;
     case 'ai:settings': await configureAI(); break;
+
+    // ── Document Assurance, version history and premium view state ──────
+    // Every one of these is offline. Nothing here uploads document bytes.
+    case 'assurance:inspect': await openSecurityInspector(); break;
+    case 'assurance:accessibility': await openAccessibilityChecker(); break;
+    case 'assurance:sanitize': await flattenAndSanitize(); break;
+    case 'assurance:a11yFix': await applyAccessibilityFixes(); break;
+    case 'assurance:timeline': await openTimeline(); break;
+    case 'assurance:checkpoint': await createCheckpoint(); break;
+    case 'assurance:trust': await openTrustCenter(); break;
+    case 'view:assurance': setSidebar('assurance'); break;
+    case 'view:timeline': setSidebar('timeline'); break;
+    case 'view:focus': toggleFocusMode(); break;
+    case 'view:highContrast': toggleHighContrast(); break;
+    case 'view:cycleSkin': cycleSkin(); break;
+    case 'view:themeGallery': await openThemeGallery(); break;
+    case 'view:theme:default': case 'view:theme:ocean': case 'view:theme:forest':
+    case 'view:theme:amber': case 'view:theme:rose': case 'view:theme:violet':
+    case 'view:theme:graphite': case 'view:theme:aurora': case 'view:theme:contrast':
+      setSkin(action.slice('view:theme:'.length));
+      break;
 
     case 'help:startPage':
       // The app boots into the workspace; this is the way back to the full

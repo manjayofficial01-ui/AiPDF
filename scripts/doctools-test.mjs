@@ -12,6 +12,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from "node:os";
 import { fileURLToPath } from 'node:url';
 import { PDFDocument as PdfLibDoc, StandardFonts, rgb } from '@cantoo/pdf-lib';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
@@ -21,7 +22,9 @@ const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.e
 const FIXTURE = path.join(ROOT, '.fixtures', 'doctools.pdf');
 const OTHER = path.join(ROOT, '.fixtures', 'doctools-other.pdf');
 const PORT = 9481;
-const UD = path.join(ROOT, '.smoke', 'doctools-ud');
+// Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
+// trip the safe-delete bulk guard; they also inherit another suite settings.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-doctools-test-ud-"));
 const OUT = path.join(ROOT, '.smoke', 'doctools-out.pdf');
 
 /* The app serves standard-font metrics from /v/stdfonts/ (see viewer.js). This
@@ -53,7 +56,6 @@ const pageTexts = async (pdf) => {
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-fs.rmSync(UD, { recursive: true, force: true });
 
 /* ── fixtures ──────────────────────────────────────────────────────────── */
 

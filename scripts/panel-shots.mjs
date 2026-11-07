@@ -8,6 +8,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,11 +19,15 @@ const PORT = 9413;
 
 fs.mkdirSync(OUT, { recursive: true });
 
+// Per-run userData: the shared profile can keep the renderer stuck mid-boot
+// and makes consecutive runs depend on each other's persisted state.
+const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-panel-shots-'));
+
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
 
 async function run(fixture, name) {
-  const child = spawn(ELECTRON, ['.', `--remote-debugging-port=${PORT}`, path.join(ROOT, '.fixtures', fixture)], { cwd: ROOT, env: childEnv });
+  const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`, path.join(ROOT, '.fixtures', fixture)], { cwd: ROOT, env: childEnv });
   child.stdout.on('data', () => {});
   child.stderr.on('data', () => {});
   let list = null;

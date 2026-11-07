@@ -13,6 +13,7 @@ import {
   posterTiles, singlePagePlan, splitBySizePlan, chunkByCount, autoRenameSuggest,
   repairCheck, PAGE_NUMBER_FORMATS, pageNumberPlan, autoRotatePlan,
   attachmentOps, unlockFormsPlan, PIPELINE_STEPS, validatePipeline, runPipelineModel,
+  pipelineStamps,
 } from '../src/renderer/js/stirling.js';
 
 let n = 0;
@@ -185,6 +186,68 @@ t('runPipelineModel queues writer steps and runs sanitize', () => {
   assert.equal(doc.pipelineFlags.compress.presetId, 'web');
   assert.ok(r.applied.length >= 2);
   assert.ok(r.skipped.length >= 1);
+});
+t('every pipeline step has an executable flag or a pure effect', () => {
+  const doc = { attachments: [], meta: {} };
+  const r = runPipelineModel(doc, PIPELINE_STEPS.map((s) => ({ id: s.id })));
+  assert.equal(r.skipped.length, 0, `skipped: ${r.skipped.join(', ')}`);
+  const f = doc.pipelineFlags || {};
+  for (const id of ['compress', 'removeBlanks', 'flatten', 'grayscale', 'addPageNumbers', 'watermark', 'splitSize']) {
+    const key = id === 'addPageNumbers' ? 'pageNumbers' : id;
+    assert.ok(f[key], `${id} produced no ${key} flag`);
+  }
+  assert.deepEqual(doc.pipeline, PIPELINE_STEPS.map((s) => s.id));
+});
+t('pipeline params are carried through, not replaced by defaults', () => {
+  const doc = { attachments: [], meta: {} };
+  runPipelineModel(doc, [
+    { id: 'addPageNumbers', params: { formatId: 'ROMAN' } },
+    { id: 'watermark', params: { text: 'CONFIDENTIAL' } },
+    { id: 'splitSize', params: { targetMB: 2 } },
+  ]);
+  assert.equal(doc.pipelineFlags.pageNumbers.formatId, 'ROMAN');
+  assert.equal(doc.pipelineFlags.watermark.text, 'CONFIDENTIAL');
+  assert.equal(doc.pipelineFlags.splitSize.targetMB, 2);
+});
+t('pipelineStamps makes one numbered stamp per page', () => {
+  const stamps = pipelineStamps({ pageNumbers: { formatId: 'n-of-N' } }, 3);
+  assert.equal(stamps.length, 3);
+  assert.deepEqual(stamps.map((s) => s.text), ['Page 1 of 3', 'Page 2 of 3', 'Page 3 of 3']);
+  assert.deepEqual(stamps.map((s) => s.from), [1, 2, 3]);
+  assert.ok(stamps.every((s) => s.kind === 'footer' && s.align === 'center'));
+});
+t('pipelineStamps honours the format and header placement', () => {
+  const stamps = pipelineStamps({ pageNumbers: { formatId: 'ROMAN', scope: 'header', align: 'right', fontSize: 14 } }, 2);
+  assert.deepEqual(stamps.map((s) => s.text), ['I', 'II']);
+  assert.ok(stamps.every((s) => s.kind === 'header' && s.align === 'right' && s.fontSize === 14));
+});
+t('pipelineStamps builds a real diagonal watermark', () => {
+  const stamps = pipelineStamps({ watermark: { text: 'INTERNAL' } }, 4);
+  assert.equal(stamps.length, 1);
+  const w = stamps[0];
+  assert.equal(w.kind, 'watermark');
+  assert.equal(w.text, 'INTERNAL');
+  assert.equal(w.from, 1);
+  assert.equal(w.to, 4);
+  assert.equal(w.behind, true);
+  assert.equal(w.opacity, 0.16);
+});
+t('pipelineStamps clamps bad params and never writes an empty watermark', () => {
+  const flags = { watermark: { text: '  ', angle: 900, opacity: 99 }, pageNumbers: { fontSize: 999 } };
+  const stamps = pipelineStamps(flags, 1);
+  const w = stamps.find((s) => s.kind === 'watermark');
+  const p = stamps.find((s) => s.kind === 'footer');
+  assert.equal(w.text, 'DRAFT');
+  assert.equal(w.angle, 90);
+  assert.equal(w.opacity, 1);
+  assert.equal(p.fontSize, 24);
+  assert.deepEqual(pipelineStamps({}, 0), []);
+  assert.deepEqual(pipelineStamps(null, 5), []);
+});
+t('both text-writing steps can be combined in one build pass', () => {
+  const stamps = pipelineStamps({ pageNumbers: {}, watermark: { text: 'DRAFT' } }, 2);
+  assert.equal(stamps.length, 3);
+  assert.equal(new Set(stamps.map((s) => s.id)).size, 3, 'stamp ids must be unique');
 });
 
 console.log(`\n${n} checks passed`);

@@ -12,6 +12,8 @@
  *   node scripts/launch-test.mjs
  */
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -65,12 +67,16 @@ function visibleWindowCount(pid) {
   });
 }
 
+// Per-run userData: the shared profile can keep the renderer stuck mid-boot
+// and makes consecutive runs depend on each other's persisted state.
+const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-launch-test-'));
+
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE; // would make require('electron') return the Node binding
 // NOTE: do not pass windowsHide here. It sets STARTUPINFO wShowWindow=SW_HIDE,
 // which makes Windows create the child's GUI window hidden and the visibility
 // assertion below then measures the harness instead of the app.
-const child = spawn(ELECTRON, ['.', `--remote-debugging-port=${PORT}`], { cwd: ROOT, env: childEnv });
+const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env: childEnv });
 let earlyExit = null;
 child.stdout.on('data', (d) => process.stdout.write(String(d)));
 child.stderr.on('data', (d) => process.stdout.write(String(d)));

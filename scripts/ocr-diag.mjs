@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
+import os from "node:os";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** Newest packaged build (`dist-build`, `dist-build29`, …). */
@@ -34,11 +35,12 @@ const ELECTRON = PACKAGED_EXE && process.env.AIPDF_TARGET === 'packaged'
 const EXTRA_ARGS = ELECTRON === PACKAGED_EXE ? [] : ['.'];
 const FIXTURE = path.join(ROOT, '.fixtures', 'scan.pdf');
 const PORT = 9471;
-const UD = path.join(ROOT, '.smoke', `ocr-diag-ud${ELECTRON === PACKAGED_EXE ? '-pkg' : ''}`);
+// Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
+// trip the safe-delete bulk guard; they also inherit another suite settings.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-ocr-diag-ud-"));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-fs.rmSync(UD, { recursive: true, force: true });
 
 const child = spawn(ELECTRON, [...EXTRA_ARGS, FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 console.log(`DIAG target: ${ELECTRON === PACKAGED_EXE ? 'PACKAGED' : 'DEV'} -> ${ELECTRON}`);

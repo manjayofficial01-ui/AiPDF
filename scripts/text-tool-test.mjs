@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Live verification for the Text-tool work: resize handles, copy/paste, the
  * square fill chip and the new None fill.
@@ -16,6 +17,8 @@
  * the property under test.
  */
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,10 +26,13 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9417;
+// Isolated userData: a stale shared profile can leave the renderer stuck
+// mid-boot, which shows up here as missing selection handles.
+const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-texttool-'));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
+const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 
@@ -495,6 +501,7 @@ if (h) {
 child.kill();
 await sleep(1000);
 try { child.kill('SIGKILL'); } catch { /* gone */ }
+try { fs.rmSync(PROFILE, { recursive: true, force: true, maxRetries: 2 }); } catch { /* OS temp cleans up */ }
 
 const failed = results.filter((r) => !r.ok);
 console.log(failed.length ? `\nTXT_FAIL ${failed.length}/${results.length} checks failed` : `\nTXT_PASS all ${results.length} checks green`);

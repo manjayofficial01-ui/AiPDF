@@ -17,6 +17,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from "node:os";
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,8 +33,9 @@ const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
 // Own userData: never fights the single-instance lock of a real open window,
 // same recipe scripts/ocr-test.mjs uses.
-const UD = path.join(OUT, 'table-ocr-ud');
-fs.rmSync(UD, { recursive: true, force: true });
+// Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
+// trip the safe-delete bulk guard; they also inherit another suite settings.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-table-real-ocr-live-ud-"));
 const child = spawn(ELECTRON, ['.', FILE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env: childEnv });
 child.stderr.on('data', () => {});
 // Watchdog: OCR has 4 minutes; nothing here should exceed 7 minutes total.

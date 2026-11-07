@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Live check for the Hand tool: it must be reachable from the ribbon, show as
  * the active mode, give a grab cursor, actually pan the scroller, and — unlike
@@ -7,6 +8,8 @@
  *   node scripts/hand-tool-test.mjs
  */
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,7 +24,9 @@ delete env.ELECTRON_RUN_AS_NODE;
 // the real profile let a previous run leave the app on another ribbon tab —
 // where the Hand button does not exist — and the test failed for reasons that
 // had nothing to do with the Hand tool.
-const UD = path.join(ROOT, '.smoke', 'hand-test-ud');
+// Per-run temp profile: fixed .smoke/ user-data dirs trip the safe-delete bulk
+// guard once Chromium has written 50+ files into them.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-hand-test-ud-'));
 const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});

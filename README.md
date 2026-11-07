@@ -32,6 +32,32 @@ Mapped from the capabilities that define the category leaders:
 | **AI Contract Review** | Detects whether a document is an agreement, then reports parties, key terms (term, payment, renewal, termination, liability, governing law…), **risk flags** by severity (auto‑renewal, uncapped liability, unilateral clauses…), and "before you sign" action items — every finding cited with a clickable page jump. | Acrobat AI Contract Intelligence |
 | **AI Document Outline** | Builds a hierarchical outline of the document with page references; every entry jumps to its page. | UPDF mind map |
 | **Read aloud (TTS)** | Speaks your document from a floating player — **play/pause, stop, 0.5–2× speed and a live page indicator**. The local system voice works offline with no key; bring your own key for **ElevenLabs, Fish Audio, Mistral (Voxtral) or Google Gemini TTS** (or any OpenAI‑compatible `/audio/speech` endpoint). Selecting a provider auto‑fills its official base URL, **voices are fetched live with your key** ("Fetch voices"), and **Test voice** speaks a sample before you commit. Pages are split at sentence boundaries and read on with optional auto‑advance. | Acrobat Read Aloud / cloud TTS |
+| **Assurance & trust (v2.25)** | Offline **document forensics** (embedded JavaScript, incremental-update history that can survive a redaction, print‑vs‑screen mismatches), a **PDF/UA + WCAG accessibility checker**, a **Trust Center** with a local egress ledger, and a **Version Timeline** (IndexedDB checkpoints with restore/export). Rebuild/sanitize repairs only change the open document's bytes — nothing reaches disk until you Save. | Foxit Action Inspector / Adobe Auto‑Tag |
+| **Appearance (v2.26)** | Nine colour palettes (Slate Indigo, Ocean Teal, Forest Emerald, Amber Ember, Rose Quartz, Violet Ink, Graphite, Aurora, High Contrast), each with light/dark variants. The gallery previews real painted colours, the status‑bar chip names the active palette, and `View ▸ Colour Theme` mirrors the choice in the native menu. Focus mode and high contrast are persistent. | — |
+| **Full native Tools menu (v2.26)** | A top‑level `&Tools` menu exposes the complete 36‑tool catalogue, grouped Select / Text / Draw / Edit. Every ribbon tool has a native menu item and a dispatch case; `test:appearance` fails if either is missing. | — |
+
+---
+
+## What v2.26 closes
+
+The v2.25/v2.26 work was verified against a fresh installer rather than just the
+source tree:
+
+- **Automate pipeline is complete.** All eight steps now execute. Page numbers
+  (one stamp per page, with a chosen format), a text watermark, flatten,
+  compress, grayscale, blank‑page removal and sanitize are committed in a single
+  `buildPdf()` pass; **Split by size** then exports the rebuilt bytes as parts.
+  Steps with parameters expose their options right next to the checkbox —
+  previously `pageNumbers`, `watermark` and `splitSize` were recorded as
+  "queued" and silently did nothing.
+- **Every CDP suite now runs in its own `os.tmpdir()` profile.** The shared
+  profile could leave the renderer stuck mid‑boot; that single cause produced
+  the whole "legacy red" list (`system-font-test`, `text-tool-test`,
+  `table-cell-test` when chained). Both are green again.
+- **Packaging gates actually verify the packaged build.** `test:icon` now picks
+  the newest `dist-buildN` instead of skipping the packed checks because a
+  directory named `dist-build` never exists; `test:asar` compares all 2,519
+  archive entries byte‑for‑byte with their source.
 
 ---
 
@@ -510,6 +536,15 @@ node scripts/smoke-pdf.mjs            # Node: pdf-lib ops (annot AP, encrypt AES
 node scripts/reflow-test.mjs          # Node: content-stream text engine (walk/group/excise primitives)
 node scripts/make-fixtures.mjs        # regenerate the test fixture PDF
 
+# Assurance / appearance / packaging (v2.25–v2.26):
+npm run test:forensics                # Node: 64 offline byte-level forensic + PDF/UA checks
+npm run test:assurance                # real app: dialogs, panels, ledger, timeline, agent API (34)
+npm run test:appearance               # real app: 36 tools + 9 palettes + gallery + menu wiring
+npm run test:stirling                 # Node: document-tool planners incl. the pipeline queue
+npm run test:pipeline                 # Node: page numbers / watermark really land in saved bytes
+npm run test:icon                     # static + packaged icon frames from the newest installer
+npm run test:asar                     # every app.asar entry is byte-identical to its source
+
 # Tables (detection + cell-scoped editing):
 npm run test:tables                   # Node: detector unit suite (31) + real fixture (24) + cell split (19)
 npm run test:table-ui                 # real app: ask-for-text, cell-scoped editor, truthful cell save (44)
@@ -579,10 +614,20 @@ window (via `scripts/win-visible.ps1`) and that `requestAnimationFrame` fires.
   a plan cannot mutate anything before you approve it, and an approved change is
   confirmed in the bytes that were written (`test:trust`, `test:redact`,
   `test:editplan`).
-- Still open against the same checklist: tagged PDF / PDF‑UA output (no
-  `/StructTreeRoot`, no `/Lang`, no figure alt text is written today), a visual
+- v2.25 added an offline **checker and repair surface** for PDF/UA / WCAG
+  (tag order, `/Lang`, alt text, headings, table structure) plus document
+  forensics, the Trust Center ledger and a local version timeline. The checker
+  reports uncertain repairs rather than pretending they succeeded.
+- Still open against the same checklist: **writing** tagged PDF / PDF‑UA output
+  from scratch (the checker does not author a full `/StructTreeRoot`), a visual
   page‑image diff alongside the text diff, batch operations across a folder of
-  files, and PDF→Excel. Cryptographic *signing* is out of scope — the app
-  protects existing signatures rather than creating them.
+  files, a full MCP server transport, and PDF→Excel. Cryptographic *signing* is
+  out of scope — the app protects existing signatures rather than creating them.
+- The old "legacy red" list is gone: it was caused by CDP suites sharing one
+  Electron `userData` profile and by stale harness hit points (presses below
+  the viewport, the Direct Editor's ask‑for‑text dialog, hidden‑panel SVGs).
+  All CDP suites now run in per‑run temp profiles and assert against real
+  geometry. `modaldrag` can still flake once when chained immediately after
+  other Electron suites; rerun it alone.
 - Known environment caveat: the WebGL/pdf.js GPU path is disabled by default on
   some VMs; software rendering is used and works correctly.

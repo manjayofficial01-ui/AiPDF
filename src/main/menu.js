@@ -53,6 +53,16 @@ const MENU_ACTIONS = [
   'view:rotateCW',
   'view:rotateCCW',
   'view:darkMode',
+  'view:themeGallery',
+  'view:theme:default',
+  'view:theme:ocean',
+  'view:theme:forest',
+  'view:theme:amber',
+  'view:theme:rose',
+  'view:theme:violet',
+  'view:theme:graphite',
+  'view:theme:aurora',
+  'view:theme:contrast',
   'view:presentation',
   'view:pages',
   'view:bookmarks',
@@ -90,6 +100,16 @@ const MENU_ACTIONS = [
   'tool:image',
   'tool:signature',
   'tool:redact',
+  // Also reachable from the complete Tools > catalogue
+  'tool:editImage',
+  'tool:roundRect',
+  'tool:polygon',
+  'tool:polyline',
+  'tool:cloud',
+  'tool:areaHighlight',
+  'tool:caret',
+  'tool:measureArea',
+  'tool:editArea',
   'measure:scale',
 
   // Edit PDF (content modification)
@@ -173,6 +193,9 @@ const isMac = process.platform === 'darwin';
  */
 function buildMenu(send, opts = {}) {
   const recents = Array.isArray(opts.recents) ? opts.recents : [];
+  // Persisted colour theme, so the View > Colour Theme radios reflect the
+  // real selection instead of always checking the factory default.
+  const skin = opts.skin || 'default';
   const recentSubmenu = recents.length
     ? recents.slice(0, 12).map((r) => ({
         label: r.name || r.path,
@@ -283,9 +306,28 @@ function buildMenu(send, opts = {}) {
         { label: 'Rotate Counter-clockwise', accelerator: 'CmdOrCtrl+Shift+-', click: () => send('view:rotateCCW') },
         { type: 'separator' },
         { label: 'Toggle Dark Mode', accelerator: 'CmdOrCtrl+Shift+D', click: () => send('view:darkMode') },
+        {
+          label: 'Colour Theme',
+          submenu: [
+            { label: 'Slate Indigo', type: 'radio', checked: skin === 'default', click: () => send('view:theme:default') },
+            { label: 'Ocean Teal', type: 'radio', checked: skin === 'ocean', click: () => send('view:theme:ocean') },
+            { label: 'Forest Emerald', type: 'radio', checked: skin === 'forest', click: () => send('view:theme:forest') },
+            { label: 'Amber Ember', type: 'radio', checked: skin === 'amber', click: () => send('view:theme:amber') },
+            { label: 'Rose Quartz', type: 'radio', checked: skin === 'rose', click: () => send('view:theme:rose') },
+            { label: 'Violet Ink', type: 'radio', checked: skin === 'violet', click: () => send('view:theme:violet') },
+            { label: 'Graphite', type: 'radio', checked: skin === 'graphite', click: () => send('view:theme:graphite') },
+            { label: 'Aurora', type: 'radio', checked: skin === 'aurora', click: () => send('view:theme:aurora') },
+            { label: 'High Contrast (accessibility)', type: 'radio', checked: skin === 'contrast', click: () => send('view:theme:contrast') },
+            { type: 'separator' },
+            { label: 'Colour Theme Gallery…', click: () => send('view:themeGallery') },
+          ],
+        },
         { label: 'Show Rulers', accelerator: 'CmdOrCtrl+Shift+R', click: () => send('view:rulers') },
         { label: 'Clear Guides', click: () => send('view:clearGuides') },
         { label: 'Presentation Mode', accelerator: 'CmdOrCtrl+Shift+F', click: () => send('view:presentation') },
+        { label: 'Focus Mode  (Ctrl+Alt+F)', click: () => send('view:focus') },
+        { label: 'Cycle Appearance  (Ctrl+Alt+S)', click: () => send('view:cycleSkin') },
+        { label: 'High Contrast  (Ctrl+Alt+C)', click: () => send('view:highContrast') },
         { label: 'Toggle Full Screen', role: 'togglefullscreen' },
         { type: 'separator' },
         { label: 'Page Thumbnails', accelerator: 'CmdOrCtrl+Shift+P', click: () => send('view:pages') },
@@ -338,6 +380,77 @@ function buildMenu(send, opts = {}) {
         { label: 'Image…  (I)', click: () => send('tool:image') },
         { label: 'Signature…', accelerator: 'CmdOrCtrl+Shift+G', click: () => send('tool:signature') },
         { label: 'Redact  (X)', click: () => send('tool:redact') },
+      ],
+    },
+    {
+      // The complete tool catalogue. Ribbon groups are organised by task and
+      // only show one tab at a time; this menu is the stable, universally
+      // reachable index of EVERY tool in TOOLS (app.js), grouped the same way.
+      // All entries dispatch through the shared action bus, so the native
+      // menu, the ribbon and the command palette can never disagree.
+      label: '&Tools',
+      submenu: [
+        {
+          label: 'Select && navigate',
+          submenu: [
+            { label: 'Hand — pan the document', click: () => send('tool:hand') },
+            { label: 'Select  (V)', click: () => send('tool:select') },
+            { label: 'Edit object — placed images / XObjects', click: () => send('tool:editImage') },
+          ],
+        },
+        {
+          label: 'Text && markup',
+          submenu: [
+            { label: 'Highlight  (H)', click: () => send('tool:highlight') },
+            { label: 'Underline  (U)', click: () => send('tool:underline') },
+            { label: 'Strikethrough  (S)', click: () => send('tool:strikeout') },
+            { label: 'Squiggly  (Q)', click: () => send('tool:squiggly') },
+            { label: 'Area highlight', click: () => send('tool:areaHighlight') },
+            { label: 'Insert text marker', click: () => send('tool:caret') },
+            { type: 'separator' },
+            { label: 'Sticky Note  (N)', click: () => send('tool:note') },
+            { label: 'Callout  (C)', click: () => send('tool:callout') },
+            { label: 'Text Box  (T)', click: () => send('tool:textbox') },
+            { type: 'separator' },
+            { label: 'Format Painter', click: () => send('tool:formatPainter') },
+            { label: 'Colour picker (eyedropper)', click: () => send('tool:eyedropper') },
+          ],
+        },
+        {
+          label: 'Draw && shapes',
+          submenu: [
+            { label: 'Rectangle  (R)', click: () => send('tool:rect') },
+            { label: 'Rounded rect', click: () => send('tool:roundRect') },
+            { label: 'Ellipse  (O)', click: () => send('tool:ellipse') },
+            { label: 'Line  (L)', click: () => send('tool:line') },
+            { label: 'Arrow  (A)', click: () => send('tool:arrow') },
+            { label: 'Polygon', click: () => send('tool:polygon') },
+            { label: 'Polyline', click: () => send('tool:polyline') },
+            { label: 'Cloud', click: () => send('tool:cloud') },
+            { type: 'separator' },
+            { label: 'Pencil  (P)', click: () => send('tool:ink') },
+            { label: 'Brush', click: () => send('tool:brush') },
+            { label: 'Marker / highlighter', click: () => send('tool:highlighter') },
+            { label: 'Eraser  (E)', click: () => send('tool:eraser') },
+            { type: 'separator' },
+            { label: 'Stamp  (K)', click: () => send('tool:stamp') },
+            { label: 'Image…  (I)', click: () => send('tool:image') },
+            { label: 'Signature…', click: () => send('tool:signature') },
+          ],
+        },
+        {
+          label: 'Edit && measure',
+          submenu: [
+            { label: 'Direct Editor  (Ctrl+E)', click: () => send('tool:editText') },
+            { label: 'Area Direct Edit', click: () => send('tool:editArea') },
+            { label: 'Whiteout', click: () => send('tool:whiteout') },
+            { label: 'Redact  (X)', click: () => send('tool:redact') },
+            { label: 'Link', click: () => send('tool:link') },
+            { type: 'separator' },
+            { label: 'Measure distance  (M)', click: () => send('tool:measure') },
+            { label: 'Perimeter && Area', click: () => send('tool:measureArea') },
+          ],
+        },
       ],
     },
     {
@@ -418,6 +531,22 @@ function buildMenu(send, opts = {}) {
         { label: 'Document Information…', click: () => send('docs:info') },
         { type: 'separator' },
         { label: 'Automate (Pipeline)…', click: () => send('docs:automate') },
+      ],
+    },
+    {
+      label: '&Assurance',
+      submenu: [
+        { label: 'Security Inspector…', click: () => send('assurance:inspect') },
+        { label: 'Accessibility Checker…', click: () => send('assurance:accessibility') },
+        { type: 'separator' },
+        { label: 'Flatten && Sanitize (remove hidden revisions)…', click: () => send('assurance:sanitize') },
+        { label: 'Apply Safe Accessibility Fixes…', click: () => send('assurance:a11yFix') },
+        { type: 'separator' },
+        { label: 'Version Timeline…', click: () => send('assurance:timeline') },
+        { label: 'New Checkpoint…', click: () => send('assurance:checkpoint') },
+        { type: 'separator' },
+        { label: 'Trust Center — local egress && audit ledger', click: () => send('assurance:trust') },
+        { label: 'Assurance Panel', click: () => send('view:assurance') },
       ],
     },
     {

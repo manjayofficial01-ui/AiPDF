@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Throwaway diagnostic: why does pressing 'r' not switch to the Rectangle tool?
  * Separates three possibilities — the keystroke never reaches the listener, the
@@ -6,6 +7,8 @@
  * sending an event type that does not produce a keydown at all.
  */
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -14,9 +17,13 @@ const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.e
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9419;
 
+// Per-run userData: the shared profile can keep the renderer stuck mid-boot
+// and makes consecutive runs depend on each other's persisted state.
+const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-_probe-keys-'));
+
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
+const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

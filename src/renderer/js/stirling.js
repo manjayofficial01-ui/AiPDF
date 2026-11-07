@@ -502,11 +502,11 @@ export function unlockFormsPlan(fields = []) {
 /* ── Automate: batch pipelines (Stirling Automate / Processor) ───────── */
 
 export const PIPELINE_STEPS = [
-  { id: 'compress', label: 'Compress', needsDoc: true },
+  { id: 'compress', label: 'Compress', needsDoc: true, param: 'presetId' },
   { id: 'removeBlanks', label: 'Remove blank pages', needsDoc: true },
   { id: 'sanitize', label: 'Sanitize (strip attachments/metadata)', needsDoc: true },
   { id: 'flatten', label: 'Flatten annotations', needsDoc: true },
-  { id: 'addPageNumbers', label: 'Add page numbers', needsDoc: true },
+  { id: 'addPageNumbers', label: 'Add page numbers', needsDoc: true, param: 'formatId' },
   { id: 'watermark', label: 'Add watermark text', needsDoc: true, param: 'text' },
   { id: 'grayscale', label: 'Convert to grayscale', needsDoc: true },
   { id: 'splitSize', label: 'Split by size (export)', needsDoc: true, param: 'targetMB' },
@@ -523,8 +523,8 @@ export function validatePipeline(steps = []) {
 
 /**
  * Apply pipeline steps to a document model in order. Only pure model ops
- * run here (sanitize, remove-blank plumbing flags); raster/writer steps
- * record their intent on `doc.pipeline` for app.js to execute at save.
+ * run here (sanitize); every other step records its intent — including its
+ * parameters — on `doc.pipelineFlags` for app.js to execute in one pass.
  * Returns { applied[], skipped[] }.
  */
 export function runPipelineModel(doc, steps = []) {
@@ -555,8 +555,9 @@ export function runPipelineModel(doc, steps = []) {
       } else if (s.id === 'watermark' && doc) {
         (doc.pipelineFlags = doc.pipelineFlags || {}).watermark = s.params || { text: 'DRAFT' };
         applied.push(`watermark “${(s.params || {}).text || 'DRAFT'}” (queued)`);
-      } else if (s.id === 'splitSize') {
-        applied.push('split by size runs at export');
+      } else if (s.id === 'splitSize' && doc) {
+        (doc.pipelineFlags = doc.pipelineFlags || {}).splitSize = s.params || { targetMB: 5 };
+        applied.push('split by size (queued for export)');
       } else {
         skipped.push(s.id);
       }
@@ -566,4 +567,49 @@ export function runPipelineModel(doc, steps = []) {
   }
   if (doc) doc.pipeline = (steps || []).map((s) => s?.id).filter(Boolean);
   return { applied, skipped };
+}
+
+/**
+ * Stamp descriptors for the pipeline steps that write real PDF text. Pure:
+ * app.js temporarily appends these to `doc.stamps` for the single buildPdf()
+ * pass that commits the whole pipeline, so nothing is left queued and nothing
+ * is written twice on a later save.
+ *
+ * Page numbers need ONE stamp per page — a single stamp carries one `text`,
+ * so a whole-document stamp would print "Page 1 of N" on every page.
+ */
+export function pipelineStamps(flags = {}, pageCount = 0) {
+  const out = [];
+  const pages = Math.max(0, Math.floor(Number(pageCount) || 0));
+  const bounded = (v, lo, hi, fallback) => {
+    const x = Number(v);
+    return Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : fallback;
+  };
+  const pn = flags?.pageNumbers;
+  if (pn && pages > 0) {
+    const plan = pageNumberPlan({ formatId: pn.formatId || 'n-of-N', pageCount: pages });
+    const kind = pn.scope === 'header' ? 'header' : 'footer';
+    const align = pn.align || 'center';
+    const fontSize = bounded(pn.fontSize, 7, 24, 10);
+    for (const p of plan.pages) {
+      out.push({
+        id: `pipeline-pn-${p.page + 1}`, kind, text: p.text, align, fontSize,
+        color: [0.4, 0.4, 0.4], behind: false,
+        from: p.page + 1, to: p.page + 1, odd: 'all',
+      });
+    }
+  }
+  const wm = flags?.watermark;
+  if (wm && pages > 0) {
+    const text = String(wm.text ?? '').trim().slice(0, 120) || 'DRAFT';
+    out.push({
+      id: 'pipeline-watermark', kind: 'watermark', text, image: null,
+      fontSize: bounded(wm.fontSize, 12, 160, 56),
+      color: [0.54, 0.56, 0.61],
+      opacity: bounded(wm.opacity, 0.02, 1, 0.16),
+      angle: bounded(wm.angle, -90, 90, -45),
+      scale: 60, behind: true, from: 1, to: pages, odd: 'all',
+    });
+  }
+  return out;
 }

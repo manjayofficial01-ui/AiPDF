@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * GUI walkthrough — drives the REAL app like a user and exercises every
  * menu/ribbon action one by one (the wiring test proves actions are
@@ -20,6 +21,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,9 +32,13 @@ const OUT = path.join(ROOT, '.smoke');
 const PORT = 9416;
 fs.mkdirSync(OUT, { recursive: true });
 
+// Per-run userData: the shared profile can keep the renderer stuck mid-boot
+// and makes consecutive runs depend on each other's persisted state.
+const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-gui-walkthrough-test-'));
+
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', `--remote-debugging-port=${PORT}`, FIXTURE], { cwd: ROOT, env: childEnv });
+const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`, FIXTURE], { cwd: ROOT, env: childEnv });
 child.stderr.on('data', () => {});
 
 const target = await (async () => {
@@ -75,17 +81,24 @@ const ev = async (expression) =>
 /* ── Console / exception capture ────────────────────────────────────────── */
 const errors = [];
 let errorMark = 0;
+// Tesseract.js and pdf.js log worker diagnostics at "error" level even though
+// the OCR/extraction succeeded. They are not renderer failures — and because
+// OCR is async, one action's noise can land in the NEXT action's window (the
+// classic "form:addText — Estimating resolution as 285" false positive).
+// Suppress only these known strings; every real exception still fails a row.
+const BENIGN_DIAG = /Parameter not found: (classify_misfit_junk_penalty|merge_fragments_in_matrix)|Estimating resolution as \d+|Invalid resolution \d+ dpi|Image too small to scale|Ensure that the `standardFontDataUrl` API parameter is provided/;
+const pushError = (text) => { if (!BENIGN_DIAG.test(text)) errors.push({ at: ++errorMark, text }); };
 send('Runtime.enable');
 send('Log.enable');
 ws.addEventListener('message', (ev) => {
   const m = JSON.parse(ev.data);
   if (m.method === 'Runtime.exceptionThrown') {
     const d = m.params.exceptionDetails;
-    errors.push({ at: ++errorMark, text: d.exception?.description || d.text || 'exception' });
+    pushError(d.exception?.description || d.text || 'exception');
   } else if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error') {
-    errors.push({ at: ++errorMark, text: m.params.args?.map((a) => a.value ?? a.description ?? '').join(' ') || 'console.error' });
+    pushError(m.params.args?.map((a) => a.value ?? a.description ?? '').join(' ') || 'console.error');
   } else if (m.method === 'Log.entryAdded' && m.params.entry.level === 'error') {
-    errors.push({ at: ++errorMark, text: m.params.entry.text });
+    pushError(m.params.entry.text);
   }
 });
 

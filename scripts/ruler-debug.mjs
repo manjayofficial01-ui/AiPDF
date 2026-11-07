@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Ruler guide live DIAGNOSTIC — launches the app, enables rulers, traces the
  * pointer event path for a press on the left ruler strip and reports exactly
@@ -8,6 +9,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from "node:os";
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,8 +17,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9444;
-const UD = path.join(ROOT, '.smoke', 'ruler-debug-ud');
-fs.rmSync(UD, { recursive: true, force: true });
+// Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
+// trip the safe-delete bulk guard; they also inherit another suite settings.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-ruler-debug-ud-"));
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;

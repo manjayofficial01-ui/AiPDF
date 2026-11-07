@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Live check for "Add a font from this computer": the picker must list real
  * installed faces, filter, add the selected one, persist it, and make it
@@ -8,6 +9,8 @@
  *   node scripts/system-font-test.mjs
  */
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,10 +18,14 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9423;
+// Every CDP suite gets its own userData. The shared profile can carry an old
+// settings.json / a stale IndexedDB, and the renderer then never finishes
+// booting — which this test used to report as seven unrelated UI failures.
+const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-sysfont-'));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
+const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -45,7 +52,17 @@ ws.addEventListener('message', (e) => {
   if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p.rej(new Error(m.error.message)) : p.res(m.result); }
 });
 await new Promise((r) => ws.addEventListener('open', r));
-const ev = async (expression) => (await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })).result.value;
+const ev = async (expression) => {
+  const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+  if (r.exceptionDetails || (r.result && r.result.exceptionDetails)) return undefined;
+  return r.result && r.result.value;
+};
+// A failed in-page expression used to surface as "[object Object]" here and
+// crash JSON.parse instead of reporting a failed check.
+const parseJson = (v, fallback = {}) => {
+  try { return typeof v === 'string' ? JSON.parse(v) : (v && typeof v === 'object' ? v : fallback); }
+  catch { return fallback; }
+};
 
 const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
@@ -135,7 +152,7 @@ const stored = await ev(`(async function(){
   var got = rec.length ? !!f.getCustomFont(rec[0].family) : false;
   return JSON.stringify({ count: rec.length, families: rec.map(function(x){return x.family;}), registered: got, inPicker: Array.from(document.querySelectorAll('#ctxBody select option, select option')).length });
 })()`);
-const storedObj = JSON.parse(stored || '{}');
+const storedObj = parseJson(stored, {});
 check('added font is indexed and registered', storedObj.count >= 1 && storedObj.registered === true, stored);
 check('"My fonts" list is rendered with Use and Remove controls', myFonts >= 1, `${myFonts} stored-font rows`);
 
@@ -156,7 +173,7 @@ const inPicker = await ev(`(async function(){
   var opts = Array.from(document.querySelectorAll('#ctxBody select option')).map(function(o){return o.value;});
   return JSON.stringify({ fam: fam, opts: opts.slice(0, 12), hasIt: opts.indexOf(fam) >= 0 });
 })()`);
-const picker = JSON.parse(inPicker || '{}');
+const picker = parseJson(inPicker, {});
 check('the font appears in the properties Font picker', picker.hasIt === true, inPicker);
 
 // ── Clean up after ourselves ───────────────────────────────────────────────
@@ -168,12 +185,13 @@ const cleaned = await ev(`(async function(){
   for (const r of mine) await f.removeUserFont(r.family);
   return JSON.stringify({ removed: mine.map(function(r){return r.family;}), left: f.userFontRecords().map(function(r){return r.family;}) });
 })()`);
-const c = JSON.parse(cleaned || '{}');
+const c = parseJson(cleaned, {});
 check('test removes only the font it added', c.removed && c.removed.length === 1 && c.left.length === preExisting.length, cleaned);
 
 child.kill();
 await sleep(1000);
 try { child.kill('SIGKILL'); } catch { /* gone */ }
+try { fs.rmSync(PROFILE, { recursive: true, force: true, maxRetries: 2 }); } catch { /* OS temp cleans up */ }
 
 const failed = results.filter((r) => !r.ok);
 console.log(failed.length ? `\nSYSFONT_FAIL ${failed.length}/${results.length} checks failed` : `\nSYSFONT_PASS all ${results.length} checks green`);

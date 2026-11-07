@@ -12,6 +12,9 @@
 <link rel="stylesheet" href="/css/app.css" />
 <link rel="stylesheet" href="/css/theme-professional.css" />
 <link rel="stylesheet" href="/css/theme-claude.css" />
+<!-- Premium design system. MUST be last: it overrides tokens from the themes
+     above without renaming any DOM id/class, so every CDP suite still works. -->
+<link rel="stylesheet" href="/css/premium.css" />
 </head>
 <body>
 
@@ -180,6 +183,16 @@
       <button type="button" data-tool="hand" title="Hand / pan — or hold Space to pan from any tool" aria-label="Hand tool"></button>
     </div>
     <span class="st-grow"></span>
+    <!-- Persistent local-first trust signal. Clicking opens the Trust Center,
+         which shows the real egress posture and the local audit ledger. -->
+    <button type="button" class="st-local" id="stLocal" title="Document processing stays on this machine">
+      <span id="stLocalIc" aria-hidden="true"></span><span>Local</span>
+    </button>
+    <!-- Persistent, one-click colour theme picker. The dot is painted from the
+         active palette, so the status bar previews the current appearance. -->
+    <button type="button" class="st-theme" id="stTheme" title="Colour themes">
+      <span class="st-theme-dot" id="stThemeDot" aria-hidden="true"></span><span id="stThemeName">Theme</span>
+    </button>
     <span class="st-item" id="stSecurity"></span>
     <span class="st-err" id="stErr"></span>
     <span class="st-item" id="stMeta"></span>

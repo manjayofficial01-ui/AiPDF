@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Redaction integrity in the real app: cover vs. removal, proved on the bytes
  * the writer actually produces.
@@ -20,16 +21,18 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
+import os from 'node:os';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9474;
-const UD = path.join(ROOT, '.smoke', 'redact-flow-ud');
+// Fresh profile per run: deleting a fixed .smoke/ Chromium profile trips the
+// safe-delete bulk guard once it grows past ~50 files.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-redact-ud-'));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-fs.rmSync(UD, { recursive: true, force: true });
 const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
@@ -75,8 +78,10 @@ const setup = await evJson(`(async function(){
   var v = await import('/js/viewer.js');
   var r = await import('/js/redaction.js');
   var d = st.activeDoc();
-  // Page 4 (0-based 3) of the fixture carries a real, selectable sentence.
-  var PAGE = 3;
+  // Page 1 (0-based 0) of the canonical fixture carries the real, selectable
+  // sentence. Older runs used a drifted 4-page save-over file; the fixture
+  // guard now restores the generated document, so pin the test to page 1.
+  var PAGE = 0;
   var tc = await v.getTextContent(PAGE);
   var item = tc.items.find(function (x) { return /functional test fixture/.test(x.str); }) || tc.items[0];
   var t = item.transform;
@@ -91,7 +96,7 @@ const setup = await evJson(`(async function(){
 })()`);
 check('the text under a mark is captured before anything changes',
   setup && /functional test fixture/.test(setup.proofSecret) && setup.native === true,
-  setup && setup.proofSecret.slice(0, 60));
+  setup && typeof setup.proofSecret === 'string' ? setup.proofSecret.slice(0, 60) : 'no proof captured');
 
 /* ── 2. The cover path is reported as a leak, not as a redaction ────────── */
 
@@ -99,7 +104,7 @@ const covered = await evJson(`(async function(){
   var st = await import('/js/store.js');
   var r = await import('/js/redaction.js');
   var d = st.activeDoc();
-  var PAGE = 3;
+  var PAGE = 0;
   var tc = await (await import('/js/viewer.js')).getTextContent(PAGE);
   var item = tc.items.find(function (x) { return /functional test fixture/.test(x.str); }) || tc.items[0];
   var t = item.transform; var size = Math.hypot(t[3], t[1]) || 12;
@@ -123,7 +128,7 @@ const sanitized = await evJson(`(async function(){
   var st = await import('/js/store.js');
   var r = await import('/js/redaction.js');
   var d = st.activeDoc();
-  var PAGE = 3;
+  var PAGE = 0;
   var tc = await (await import('/js/viewer.js')).getTextContent(PAGE);
   var item = tc.items.find(function (x) { return /functional test fixture/.test(x.str); }) || tc.items[0];
   var t = item.transform; var size = Math.hypot(t[3], t[1]) || 12;

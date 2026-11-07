@@ -17,17 +17,19 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
+import os from "node:os";
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'scan.pdf');
 const PORT = 9461;
-const UD = path.join(ROOT, '.smoke', 'ocr-test-ud');
+// Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
+// trip the safe-delete bulk guard; they also inherit another suite settings.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-ocr-test-ud-"));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-fs.rmSync(UD, { recursive: true, force: true });
 const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});

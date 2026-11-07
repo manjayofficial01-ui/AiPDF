@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Ruler guides live test — Photoshop-style drag from the rulers, verified in
  * the running app with real pointer events:
@@ -13,6 +14,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from "node:os";
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,8 +22,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9433;
-const UD = path.join(ROOT, '.smoke', 'guides-ud');
-fs.rmSync(UD, { recursive: true, force: true });
+// Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
+// trip the safe-delete bulk guard; they also inherit another suite settings.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-guides-live-test-ud-"));
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
@@ -131,13 +134,25 @@ const g1pos = await ev(`(function(){
   const r = g.getBoundingClientRect();
   return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 })()`);
-const newY = Math.round(page.t + page.h * 0.6);
+// The page can be taller than the window. A drop below the viewport still
+// "moves" the guide (its rect just scrolls out of sight) but the follow-up
+// press cannot start a gesture, so the guide is never deleted. Keep the drop
+// inside the visible window.
+const vh = Number(await ev('window.innerHeight')) || 800;
+const newY = Math.min(Math.round(page.t + page.h * 0.6), vh - 60);
 await drag(g1pos.x, g1pos.y, g1pos.x, newY);
 const movedY = await ev(`(function(){ const g = document.querySelector('.page-guides .guide-h'); return Math.round(g.getBoundingClientRect().top); })()`);
 check('dragging an existing guide moves it', movedY != null && Math.abs(movedY - newY) < 14, `guide top ${movedY} vs target ${newY}`);
 
-/* 5 — drag it back onto the top ruler: deleted. */
-await drag(g1pos.x, movedY, Math.round(hStrip.l + page.w * 0.5), Math.round(hStrip.t + hStrip.h / 2));
+/* 5 — drag it back onto the top ruler: deleted. Re-read the guide's live
+   centre: after the move its top edge no longer sits on the ::after hit strip,
+   so pressing at `movedY` starts no gesture at all. */
+const gNow = JSON.parse(await ev(`(function(){
+  var g = document.querySelector('.page-guides .guide-h');
+  var r = g.getBoundingClientRect();
+  return JSON.stringify({ x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+})()`));
+await drag(gNow.x, gNow.y, Math.round(hStrip.l + page.w * 0.5), Math.round(hStrip.t + hStrip.h / 2));
 const afterDel = await ev(`document.querySelectorAll('.page-guides .guide-h').length`);
 check('dropping a guide on its ruler deletes it', afterDel === 1, `${afterDel} horizontal guide(s) left`);
 

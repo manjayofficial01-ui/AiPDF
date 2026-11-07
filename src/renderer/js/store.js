@@ -38,6 +38,18 @@ export const DEFAULT_SETTINGS = {
   // (menubar + ribbon) for a distraction-free view; the title bar stays.
   ribbonMode: 'expanded',
   chromeHidden: false,
+  // Premium design system (css/premium.css owns the look; these own the state).
+  // `skin` is the colour theme id (see THEMES in premium.js). `contrast` is
+  // the accessibility skin; skinBeforeContrast restores the palette the user
+  // came from when high contrast is switched off again.
+  skin: 'default',
+  skinBeforeContrast: 'default',
+  // Focus mode hides everything but the page. Restored on the next launch,
+  // just like the ribbon tab and density.
+  focusMode: false,
+  // Local version timeline (IndexedDB). Every Save records a version, and
+  // named checkpoints can be added at any time. Purely on-device.
+  timelineEnabled: true,
   // Chrome density. `comfortable` is the default; `compact` tightens the
   // control heights, the ribbon and the side panels for small laptop screens.
   density: 'comfortable',        // comfortable | compact
@@ -175,6 +187,7 @@ export function applySettingsToState() {
   state.view.reverse = !!settings.reverse;
   state.view.ribbonMode = settings.ribbonMode === 'collapsed' ? 'collapsed' : 'expanded';
   state.view.chromeHidden = !!settings.chromeHidden;
+  state.view.focusMode = !!settings.focusMode;
 }
 
 export function saveSettings() {
@@ -213,6 +226,7 @@ export const state = {
     reverse: false,     // Foxit "Reverse View": right-to-left reading order
     ribbonMode: 'expanded',
     chromeHidden: false,
+    focusMode: false,   // premium.js toggles this; persisted in settings
     rotation: 0,        // global view rotation (applies to all pages)
     dark: false,
     present: false,

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Capture the redesigned UI surfaces as PNGs for visual verification.
  *
@@ -10,6 +11,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,10 +20,11 @@ const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.e
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const OUT = path.resolve(ROOT, process.argv[2] || '.smoke/redesign');
 const PORT = 9421;
-// Own profile: the chrome visibility, ribbon tab, theme and active tool all
-// persist, so sharing the real profile lets a previous test run hide the very
-// ribbon this script is trying to photograph.
-const PROFILE = path.join(ROOT, '.smoke', 'redesign-profile');
+// Fresh profile per run: chrome visibility, ribbon tab, theme, tool AND the
+// local version timeline all persist, so a reused profile photographs the
+// previous run's state. A fixed `.smoke/*` dir is also a trap — the safe-delete
+// shim refuses to remove trees past ~50 files. os.tmpdir() avoids both.
+const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-redesign-'));
 
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -230,7 +233,60 @@ await ev(`(function(){ var i = document.querySelector('.palette input'); if (i) 
 await sleep(500);
 await shot('10-palette-empty-state.png');
 
+/* ── 7. Assurance surfaces (v2.25) ─────────────────────────────────────────
+   Reload first: the palette overlay must not cover the ribbon in these shots.
+   Dialog-opening actions are fired without awaiting them (they resolve when
+   the modal closes, so awaiting would hang the CDP evaluation). */
+await ev(`location.reload()`);
+await sleep(6000);
+for (let i = 0; i < 60; i++) {
+  if (await ev('!!window.__aipdfBooted')) break;
+  await sleep(300);
+}
+await sleep(2200);
+
+await clickTab('Assurance');
+await sleep(500);
+console.log('ASSURANCE_TAB ' + await ev(`JSON.stringify({
+  active: (document.querySelector('#modeTabs .mode-tab.active')||{}).textContent,
+  groups: [...document.querySelectorAll('#ribbon .rtitle')].map(function(t){return t.textContent;}),
+  buttons: document.querySelectorAll('#ribbon .rbtn').length,
+})`));
+await shot('11-assurance-ribbon.png');
+
+const openShot = async (expr, label, file) => {
+  await ev(expr);
+  await sleep(1500);
+  console.log(label + ' ' + await ev(`JSON.stringify({
+    title: (document.querySelector('.modal-backdrop .modal-head h3')||{}).textContent || '',
+    body: !!document.querySelector('.modal-backdrop .modal-body .asr, .modal-backdrop .modal-body .tl'),
+  })`));
+  await shot(file);
+  await ev(`(function(){ var b=document.querySelector('.modal-backdrop .modal-head .icon-btn'); if(b) b.click(); return !!b; })()`);
+  await sleep(500);
+};
+
+await openShot(`window.aipdf.run('assurance:inspect'); 'started'`, 'INSPECTOR', '12-security-inspector.png');
+await openShot(`window.aipdf.run('assurance:accessibility'); 'started'`, 'A11Y', '13-accessibility-checker.png');
+await openShot(`document.getElementById('stLocal').click(); 'clicked'`, 'TRUST', '14-trust-center.png');
+await openShot(`window.aipdf.run('assurance:timeline'); 'started'`, 'TIMELINE', '15-version-timeline.png');
+
+await ev(`window.aipdf.run('view:highContrast'); 'ok'`);
+await sleep(600);
+await shot('16-high-contrast.png');
+await ev(`(async function(){
+  var s = await import('/js/store.js');
+  s.settings.skin = 'default'; s.saveSettings();
+  document.documentElement.dataset.skin = 'default';
+  document.body.classList.remove('hc');
+  return true;
+})()`);
+
 ws.close();
 child.kill();
+await sleep(1500);
+// Remove only the temp profile this run created. Failure is harmless: the next
+// run allocates a brand-new directory.
+try { fs.rmSync(PROFILE, { recursive: true, force: true, maxRetries: 2 }); } catch { /* ignore */ }
 console.log('SHOTS_DONE');
 process.exit(0);

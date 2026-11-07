@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './ensure-fixture.mjs';
 /**
  * Live verification: (1) the vertical guide PAINTS (screenshot proof) after
  * the .guide-v::after height fix, (2) Shift-draw constraints:
@@ -10,6 +11,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from "node:os";
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,8 +19,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9466;
-const UD = path.join(ROOT, '.smoke', 'shift-guide-ud');
-fs.rmSync(UD, { recursive: true, force: true });
+// Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
+// trip the safe-delete bulk guard; they also inherit another suite settings.
+const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-shift-guide-test-ud-"));
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
@@ -81,6 +84,14 @@ await ev(`(function(){
 })()`);
 
 const drag = async (fx, fy, tx, ty, shift = false) => {
+  // The fixture page is taller than the window. A press BELOW the viewport
+  // never reaches the renderer, so the drag silently creates nothing and the
+  // next check re-reads the previous shape. Translate BOTH endpoints by the
+  // same amount: dx/dy (the thing under test) is unchanged, while moves that
+  // leave the viewport still arrive thanks to pointer capture.
+  const vh = Number(await ev('window.innerHeight')) || 800;
+  const over = Math.max(fy, ty) - (vh - 40);
+  if (over > 0) { fy -= over; ty -= over; }
   const m = shift ? { modifiers: 8 } : {};   // Shift = 8 in the CDP bitmask
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: fx, y: fy, button: 'left', clickCount: 1, ...m });
   await sleep(50);
@@ -153,8 +164,24 @@ const emptySpot = async (fx, fy) => {
   return { x: Math.round(pb.l + pb.w * fx), y: Math.round(pb.t + pb.h * fy) };
 };
 
+/* A drawn shape keeps a transparent 12px hit stroke. The next press anywhere
+   near it SELECTS instead of drawing, so `anns.filter(...).pop()` re-reads the
+   previous shape and every later check reports the first drag. Start each
+   measurement from a clean sheet (the ellipse case below does this by hand). */
+const clearAnns = async () => {
+  await ev(`import('/js/store.js').then(function(m){
+    var d = m.activeDoc(); var ids = (d.annots || []).map(function(a){ return a.id; });
+    if (ids.length) m.removeAnnots(ids);
+    return 'ok';
+  })`);
+  await ev(`import('/js/annots.js').then(function(m){ m.renderPageAnnotations(${pageIdx}); return 'ok'; })`);
+  pb = await pageBox();
+  await sleep(200);
+};
+
 // Diagonal drag (~46° on screen) + Shift → snaps to a 45° diagonal.
 let a = await emptySpot(0.55, 0.15), b = await emptySpot(0.75, 0.45);
+await clearAnns();
 await drag(a.x, a.y, b.x, b.y, true);
 let anns = JSON.parse(await readAnnots() || '[]');
 let ln = anns.filter((x) => x.t === 'line').pop();
@@ -163,7 +190,12 @@ check('line + Shift snaps to 45° (screen)', !!sc && Math.abs(Math.abs(sc.dx) - 
   sc ? `dx=${sc.dx.toFixed(1)} dy=${sc.dy.toFixed(1)}` : JSON.stringify(anns));
 
 // Shallow drag (~13° from horizontal on screen) + Shift → visually HORIZONTAL.
-a = await emptySpot(0.55, 0.60); b = await emptySpot(0.85, 0.70);
+// The page is 742x1049 here, so 0.30w / 0.05h ≈ 13°: anything above 22.5°
+// legitimately snaps to the 45° lattice instead (constrainDrawPt rounds to
+// the nearest multiple of 45°). Keep the vertical delta small enough that the
+// test really measures the horizontal case it claims to measure.
+a = await emptySpot(0.55, 0.60); b = await emptySpot(0.85, 0.65);
+await clearAnns();
 await drag(a.x, a.y, b.x, b.y, true);
 anns = JSON.parse(await readAnnots() || '[]');
 ln = anns.filter((x) => x.t === 'line').pop();
@@ -173,6 +205,7 @@ check('line + Shift snaps to horizontal (screen)', !!sc && Math.abs(sc.dy) < 2,
 
 // Same shallow drag WITHOUT Shift → stays free (control).
 a = await emptySpot(0.55, 0.75); b = await emptySpot(0.85, 0.85);
+await clearAnns();
 await drag(a.x, a.y, b.x, b.y, false);
 anns = JSON.parse(await readAnnots() || '[]');
 ln = anns.filter((x) => x.t === 'line').pop();
@@ -187,6 +220,7 @@ await ev(`window.__aipdfAction('tool:rect')`);
 await sleep(200);
 
 a = await emptySpot(0.50, 0.30); b = await emptySpot(0.70, 0.55);   // dx≠dy
+await clearAnns();
 await drag(a.x, a.y, b.x, b.y, true);
 anns = JSON.parse(await readAnnots() || '[]');
 let rc = anns.filter((x) => x.t === 'rect').pop();
@@ -194,6 +228,7 @@ const sqW = rc ? Math.abs(rc.r[2] - rc.r[0]) : NaN, sqH = rc ? Math.abs(rc.r[3] 
 check('rect + Shift is a square', !!rc && Math.abs(sqW - sqH) < 1.0, `w=${sqW.toFixed(1)} h=${sqH.toFixed(1)}`);
 
 a = await emptySpot(0.50, 0.60); b = await emptySpot(0.85, 0.75);   // clearly wide
+await clearAnns();
 await drag(a.x, a.y, b.x, b.y, false);
 anns = JSON.parse(await readAnnots() || '[]');
 rc = anns.filter((x) => x.t === 'rect').pop();

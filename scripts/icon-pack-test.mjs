@@ -29,7 +29,26 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const BUILD_DIR = path.resolve(ROOT, process.argv[2] || 'dist-build');
+
+/* Builds are written to fresh `dist-buildN` directories (a locked app.asar
+   in a reused output dir silently ships stale bytes). With no explicit
+   argument, verify the newest one that actually contains a built exe —
+   otherwise this gate would skip its only real proof on every release. */
+function newestBuildDir() {
+  const dirs = fs.readdirSync(ROOT)
+    .filter((n) => /^dist-build\d*$/.test(n))
+    .map((n) => ({ n, t: fs.statSync(path.join(ROOT, n)).mtimeMs }))
+    .sort((a, b) => b.t - a.t);
+  for (const d of dirs) {
+    if (fs.existsSync(path.join(ROOT, d.n, 'win-unpacked', 'AiPDF Editor.exe'))) {
+      return path.join(ROOT, d.n);
+    }
+  }
+  return null;
+}
+const BUILD_DIR = process.argv[2]
+  ? path.resolve(ROOT, process.argv[2])
+  : (newestBuildDir() || path.resolve(ROOT, 'dist-build'));
 
 let pass = 0, fail = 0;
 function check(name, ok, detail = '') {

@@ -1,10 +1,19 @@
 # AiPDF Editor
 
-A modern, Electron‑based PDF **viewer and editor** with a built‑in AI assistant.
-It was designed by studying the standards and best‑in‑class features of the
-top consumer PDF editors (Adobe Acrobat, Foxit, PDFelement, Nitro PDF, and
-PDF‑XChange) and integrating the capabilities that matter most into a single,
-fast, local‑first desktop app.
+A modern, Electron‑based PDF **viewer and editor** for Windows — one fast,
+local‑first desktop app that studies the category leaders (Adobe Acrobat,
+Foxit, PDFelement, Nitro PDF, and PDF‑XChange) and integrates the capabilities
+that matter most.
+
+Everything the job needs is built in: commenting and markup, Acrobat‑style
+direct text editing (with table‑aware, cell‑scoped edits), object editing,
+page organization, form filling, AES‑256 encryption, **verified redaction**,
+**offline OCR** for scanned documents, read‑aloud narration, document
+forensics and a PDF/UA + WCAG accessibility checker. An optional **AI layer** —
+bring your own key (OpenAI, Google Gemini, OpenRouter, Groq, Ollama, LM
+Studio…) — adds summarize / translate / proofread, AI contract review, AI
+smart redaction and **verified AI editing**, where the model proposes a typed
+plan and nothing changes until you approve it.
 
 > Local‑first: your files never leave your machine. The AI assistant is
 > **bring‑your‑own‑key** — point it at any OpenAI‑compatible endpoint

@@ -48,7 +48,9 @@
   --text-1:          #111827;
   --text-2:          #3a465b;
   --text-3:          #5c6b82;
-  --text-4:          #8a98ac;
+  /* WCAG AA: 9px group labels need 4.5:1 too. #8a98ac was 2.73:1 on the
+     lightest chrome; this clears 4.9:1 on #f5f7fb and 5.25:1 on white. */
+  --text-4:          #5f6d82;
   --text-inverse:    #ffffff;
 
   --accent:             #3358d4;
@@ -152,7 +154,8 @@
   --text-1:          #eef3fb;
   --text-2:          #c6d1e1;
   --text-3:          #9aabc2;
-  --text-4:          #71839c;
+  /* #71839c was 4.05:1 on #1b2433; this clears 5.2:1 on the dark chrome. */
+  --text-4:          #8497b0;
   --text-inverse:    #10151f;
 
   --accent:             #87a8ff;
@@ -216,8 +219,13 @@ html[data-skin="aurora"][data-theme="dark"] {
   --th-line:rgba(111,216,200,.34); --th-rgb:111,216,200;
 }
 
-/* High contrast — pure black/white with a safety-yellow accent. WCAG AAA. */
-html[data-skin="contrast"] {
+/* High contrast — pure black/white with a safety-yellow accent. WCAG AAA.
+   applyTheme() keeps body.dark as a legacy alias alongside html[data-theme].
+   Custom properties declared on <body> win for every descendant, so the skin
+   must be re-declared on body.dark too — otherwise the default dark bundle
+   silently shadows it on the panels, status bar and all their text. */
+html[data-skin="contrast"],
+html[data-skin="contrast"] body.dark {
   --bg-app:#ffffff; --bg-sunken:#ffffff; --surface:#ffffff; --surface-raised:#ffffff; --surface-sunken:#ffffff;
   --border:#000000; --border-strong:#000000; --border-control:#000000;
   --text-1:#000000; --text-2:#000000; --text-3:#000000; --text-4:#000000;
@@ -236,7 +244,8 @@ html[data-skin="contrast"] {
   --chrome-menu:#ffffff; --chrome-menu-low:#ffffff;
   --chrome-toolbar:#ffffff; --chrome-toolbar-low:#ffffff;
 }
-html[data-skin="contrast"][data-theme="dark"] {
+html[data-skin="contrast"][data-theme="dark"],
+html[data-skin="contrast"][data-theme="dark"] body.dark {
   --bg-app:#000000; --bg-sunken:#000000; --surface:#000000; --surface-raised:#000000; --surface-sunken:#000000;
   --border:#ffffff; --border-strong:#ffffff; --border-control:#ffffff;
   --text-1:#ffffff; --text-2:#ffffff; --text-3:#ffffff; --text-4:#ffffff;
@@ -255,6 +264,11 @@ html[data-skin="contrast"][data-theme="dark"] {
 }
 html[data-skin="contrast"] .brand-mark { color:#fff; }
 html[data-skin="contrast"][data-theme="dark"] .brand-mark { color:#000; }
+/* The empty-workspace logo pins a white glyph; --brand-mark turns solid
+   safety yellow in the dark contrast skin, making it 1.27:1. Follow the
+   same ink flip as the titlebar mark. */
+html[data-skin="contrast"] .ew-logo { color:#fff; }
+html[data-skin="contrast"][data-theme="dark"] .ew-logo { color:#000; }
 html[data-skin="contrast"] :focus-visible { outline:3px solid var(--ring) !important; outline-offset:2px !important; }
 
 /* ── 2b. Colour theme gallery ─────────────────────────────────────────────
@@ -333,7 +347,14 @@ html[data-skin="graphite"][data-theme="dark"] {
 
 html[data-skin="ocean"], html[data-skin="forest"], html[data-skin="amber"],
 html[data-skin="rose"],  html[data-skin="violet"], html[data-skin="graphite"],
-html[data-skin="aurora"] {
+html[data-skin="aurora"],
+/* Same body.dark re-declaration as the contrast skin: the private --th-*
+   tokens live on <html> and inherit fine, but the semantic tokens they map
+   to must also be set on <body> or the default dark bundle wins there. */
+html[data-skin="ocean"] body.dark, html[data-skin="forest"] body.dark,
+html[data-skin="amber"] body.dark, html[data-skin="rose"] body.dark,
+html[data-skin="violet"] body.dark, html[data-skin="graphite"] body.dark,
+html[data-skin="aurora"] body.dark {
   --bg-app: var(--th-bg);
   --bg-sunken: var(--th-sunken);
   --desk: var(--th-sunken);
@@ -368,7 +389,14 @@ html[data-skin="amber"][data-theme="dark"],
 html[data-skin="rose"][data-theme="dark"],
 html[data-skin="violet"][data-theme="dark"],
 html[data-skin="graphite"][data-theme="dark"],
-html[data-skin="aurora"][data-theme="dark"] {
+html[data-skin="aurora"][data-theme="dark"],
+html[data-skin="ocean"][data-theme="dark"] body.dark,
+html[data-skin="forest"][data-theme="dark"] body.dark,
+html[data-skin="amber"][data-theme="dark"] body.dark,
+html[data-skin="rose"][data-theme="dark"] body.dark,
+html[data-skin="violet"][data-theme="dark"] body.dark,
+html[data-skin="graphite"][data-theme="dark"] body.dark,
+html[data-skin="aurora"][data-theme="dark"] body.dark {
   --accent-solid: color-mix(in srgb, var(--th-a) 55%, #000);
   --accent-solid-hover: color-mix(in srgb, var(--th-a) 70%, #000);
   --accent-text: #ffffff;
@@ -473,6 +501,50 @@ body { font-feature-settings: "cv11" 1, "ss01" 1; }
   font-weight: 650;
 }
 .mb-right { gap: 4px; }
+
+/* ── 4b. Menubar at the native minimum window size ───────────────────────
+   At 940px the 11 mode tabs need 677px, the quick tools 391px and the right
+   controls 98px — 1190px in a 940px row. Without min-width:0 the flex:1 tab
+   strip refuses to shrink and pushes Find / Palette / Ribbon toggle (plus the
+   last three tabs) completely off-screen. Pin the outer groups and let the
+   tab strip scroll instead. The 4px scrollbar sits inside a 32px strip, so
+   the 28px tabs keep their full height. */
+.menubar { min-width: 0; }
+.quick, .mb-right { flex: 0 0 auto; }
+.modes {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 32px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.modes > .mode-tab { flex: 0 0 auto; }
+.modes::-webkit-scrollbar { height: 4px; }
+.modes::-webkit-scrollbar-track { background: transparent; }
+.modes::-webkit-scrollbar-thumb {
+  border: 0; border-radius: 999px;
+  background: var(--border-strong); background-clip: content-box;
+}
+
+/* ── 4c. Hit targets ────────────────────────────────────────────────────
+   Icon buttons paint at 30x28; expand the pointer box to 32x32 with an
+   out-of-flow pseudo-element so the chrome height (--h-menu, CDP geometry)
+   stays untouched. 1px of horizontal growth only consumes the 2px gap. */
+.qbtn, .icon-btn, .tbtn, .rail-btn, .zoom-pill button, .tool-pair button {
+  position: relative;
+}
+.qbtn::after, .icon-btn::after, .tbtn::after, .rail-btn::after,
+.zoom-pill button::after, .tool-pair button::after {
+  content: ''; position: absolute; inset: -2px -1px; border-radius: inherit;
+}
+/* The tab close button was 16x16 — a destructive action with the smallest
+   target in the app. Grow the visible box, then fill the rest of the 32px. */
+.tab .t-close { width: 24px; height: 24px; position: relative; opacity: .75; }
+.tab .t-close::after { content: ''; position: absolute; inset: -4px; border-radius: inherit; }
+
 .findbar {
   border: 1px solid var(--border-strong); border-radius: 8px;
   background: var(--surface-sunken);
@@ -1038,6 +1110,16 @@ html[data-skin="contrast"] .welcome-inner { border-width: 2px; }
   .w-trust { grid-template-columns: 1fr; }
   .asr-hero { flex-direction: column; align-items: flex-start; }
   .asr-ring-label { display: none; }
+}
+
+/* At the native 940x620 minimum, 244 + 260 left only 384px (41%) for the
+   document. Give the page back ~100px without hiding either panel. Both the
+   root and body variants are listed because density-compact redeclares the
+   width tokens on <body>, where they would otherwise shadow :root. */
+@media (max-width: 1000px) {
+  :root, body, body.density-compact, body.density-comfortable {
+    --w-side: 208px; --w-ctx: 208px;
+  }
 }
 
 /* ── 13. Colour theme gallery + status-bar picker ───────────────────────── */

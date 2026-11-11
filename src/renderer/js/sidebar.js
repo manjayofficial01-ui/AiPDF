@@ -19,6 +19,19 @@ let thumbObserver = null;
 let selMode = false;
 const selectedPages = new Set();
 
+/* Annotation swatches can be any colour — the fixture's highlight is a bright
+   yellow — so a fixed white initial was 1.26:1. Pick the ink that gives the
+   better WCAG contrast against the swatch (0.179 is the black/white crossover
+   for relative luminance). rgb is a normalised [0..1] triplet. */
+function inkForRgb(rgb) {
+  const lin = [0, 1, 2].map((i) => {
+    const c = Math.min(1, Math.max(0, Number(rgb[i]) || 0));
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  const L = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+  return L > 0.179 ? '#10151f' : '#ffffff';
+}
+
 export function initSidebar() {
   const sideBody = $('#sideBody');
   thumbObserver = new IntersectionObserver((entries) => {
@@ -545,7 +558,10 @@ function renderComments() {
       const c = el('div', { class: 'cmt', dataset: { id: a.id } }, [
         el('div', {
           class: 'cmt-ic',
-          style: { background: `rgb(${Math.round(iconColor[0] * 255)},${Math.round(iconColor[1] * 255)},${Math.round(iconColor[2] * 255)})` },
+          style: {
+            background: `rgb(${Math.round(iconColor[0] * 255)},${Math.round(iconColor[1] * 255)},${Math.round(iconColor[2] * 255)})`,
+            color: inkForRgb(iconColor),
+          },
           text: (a.type || '?')[0].toUpperCase(),
         }),
         el('div', { class: 'cmt-main' }, [

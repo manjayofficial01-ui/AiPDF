@@ -68,9 +68,17 @@ for (const id of themeIds) {
   if (!appSrc.includes(`'${action}'`)) themeGaps.push(`${id}:palette`);
 }
 check('every palette has CSS + menu + dispatch + command', themeGaps.length === 0, themeGaps.join(', ') || 'all four paths');
-check('Aurora uses the shared palette token bundle',
-  /html\[data-skin="aurora"\] \{\s*--th-bg:/.test(cssSrc) && /html\[data-skin="aurora"\] \{/.test(cssSrc.slice(cssSrc.indexOf('html[data-skin="ocean"], html[data-skin="forest"]'))),
-  'aurora must be in the shared semantic-token mapping');
+/* The shared mapping's selector list can grow (body.dark aliases were added so
+   skins survive the legacy class in dark mode). Parse the list instead of
+   matching one literal tail selector, and require EVERY hue palette in it —
+   a superset of the old Aurora-only assertion. */
+const mappingStart = cssSrc.indexOf('html[data-skin="ocean"], html[data-skin="forest"]');
+const mappingSelectors = mappingStart < 0 ? '' : cssSrc.slice(mappingStart, cssSrc.indexOf('{', mappingStart));
+const mappingGaps = themeIds.filter((id) =>
+  id !== 'default' && id !== 'contrast' && !mappingSelectors.includes(`html[data-skin="${id}"]`));
+check('every palette uses the shared semantic-token mapping',
+  /html\[data-skin="aurora"\] \{\s*--th-bg:/.test(cssSrc) && mappingStart >= 0 && mappingGaps.length === 0,
+  mappingGaps.length ? `missing: ${mappingGaps.join(', ')}` : 'all hue palettes mapped, Aurora declares --th-bg');
 check('dark palettes darken solid-button fills for white text',
   /color-mix\(in srgb, var\(--th-a\) 55%, #000\)/.test(cssSrc));
 check('the gallery action is wired', cases.has('view:themeGallery') && appSrc.includes('Colour themes'));

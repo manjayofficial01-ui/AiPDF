@@ -63,6 +63,7 @@
     "test:forensics": "node scripts/forensics-test.mjs",
     "test:assurance": "node scripts/assurance-test.mjs",
     "test:appearance": "node scripts/appearance-test.mjs",
+    "test:ux-verify": "node scripts/ux-verify.mjs",
     "test:icon": "node scripts/icon-pack-test.mjs",
     "dist": "electron-builder --win --x64",
     "test:pdf2word": "node scripts/pdf2word-test.mjs",

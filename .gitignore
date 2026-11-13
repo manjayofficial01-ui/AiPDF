@@ -9,3 +9,5 @@ pdf2word-max/
 *.log
 .DS_Store
 .scratch/
+vendor/thumbnail/*.pdb
+vendor/thumbnail/*.lib

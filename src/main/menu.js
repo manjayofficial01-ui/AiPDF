@@ -180,6 +180,8 @@ const MENU_ACTIONS = [
   // Help
   'help:shortcuts',
   'help:about',
+  'help:license',
+  'help:defaultApp',
 ];
 
 const isMac = process.platform === 'darwin';
@@ -618,6 +620,9 @@ function buildMenu(send, opts = {}) {
         { type: 'separator' },
         { label: 'Keyboard Shortcuts', accelerator: 'CmdOrCtrl+/', click: () => send('help:shortcuts') },
         { label: 'About AiPDF Editor', click: () => send('help:about') },
+        { label: 'License & attribution', click: () => send('help:license') },
+        { type: 'separator' },
+        { label: 'Make AiPDF your default PDF app…', click: () => send('help:defaultApp') },
         { type: 'separator' },
         { label: 'Toggle Developer Tools', role: 'toggleDevTools' },
       ],

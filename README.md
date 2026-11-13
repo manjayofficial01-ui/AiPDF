@@ -30,6 +30,24 @@ plan and nothing changes until you approve it.
 
 ---
 
+## Publisher, website & licence
+
+| | |
+| --- | --- |
+| **Author** | Manjay Dongol |
+| **Publisher** | Manjay Dongol |
+| **Website / source** | <https://github.com/manjayofficial01-ui/AiPDF> |
+| **Licence** | MIT — see [LICENSE](LICENSE) (also `resources/LICENSE.txt` in the installed app) |
+| **Copyright** | Copyright (c) 2026 Manjay Dongol |
+
+These details are written into the Windows executable's version resource
+(`CompanyName`, `LegalCopyright`, `LegalTrademarks`), into the installer, and
+into **Help ▸ About / License & attribution** inside the app, so security
+software can identify the publisher and licence of the binary without
+guessing. `resources/NOTICE.txt` ships the same summary next to the app.
+
+---
+
 ## Features
 
 Mapped from the capabilities that define the category leaders:

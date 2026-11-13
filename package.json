@@ -4,7 +4,18 @@
   "version": "2.26.0",
   "description": "AiPDF Editor — a modern Electron-based PDF viewer & editor with AI assistance, contract intelligence, smart redaction, multi-provider read-aloud and an agentic AI bot",
   "main": "src/main/main.js",
-  "author": "manjayofficial01-ui",
+  "author": {
+    "name": "Manjay Dongol",
+    "url": "https://github.com/manjayofficial01-ui/AiPDF"
+  },
+  "homepage": "https://github.com/manjayofficial01-ui/AiPDF",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/manjayofficial01-ui/AiPDF.git"
+  },
+  "bugs": {
+    "url": "https://github.com/manjayofficial01-ui/AiPDF/issues"
+  },
   "license": "MIT",
   "dependencies": {
     "@cantoo/fontkit": "^2.0.12",
@@ -64,6 +75,7 @@
     "test:assurance": "node scripts/assurance-test.mjs",
     "test:appearance": "node scripts/appearance-test.mjs",
     "test:ux-verify": "node scripts/ux-verify.mjs",
+    "test:thumbnail": "node scripts/thumbnail-test.mjs",
     "test:icon": "node scripts/icon-pack-test.mjs",
     "dist": "electron-builder --win --x64",
     "test:pdf2word": "node scripts/pdf2word-test.mjs",
@@ -78,6 +90,7 @@
   "build": {
     "appId": "com.aipdf.editor",
     "productName": "AiPDF Editor",
+    "copyright": "Copyright (c) 2026 Manjay Dongol. Licensed under the MIT License. https://github.com/manjayofficial01-ui/AiPDF",
     "icon": "assets/icon.ico",
     "files": [
       "src/**",
@@ -91,6 +104,24 @@
       {
         "from": "vendor/tessdata",
         "to": "tessdata"
+      },
+      {
+        "from": "LICENSE",
+        "to": "LICENSE.txt"
+      },
+      {
+        "from": "NOTICE.txt",
+        "to": "NOTICE.txt"
+      }
+    ],
+    "fileAssociations": [
+      {
+        "ext": "pdf",
+        "name": "AiPDF Document",
+        "description": "PDF Document — AiPDF Editor",
+        "mimeType": "application/pdf",
+        "role": "Editor",
+        "icon": "assets/icon.ico"
       }
     ],
     "asarUnpack": [
@@ -101,7 +132,11 @@
         "nsis"
       ],
       "icon": "assets/icon.ico",
-      "artifactName": "AiPDF-Editor-${version}-setup.${ext}"
+      "artifactName": "AiPDF-Editor-${version}-setup.${ext}",
+      "legalTrademarks": "MIT License — https://github.com/manjayofficial01-ui/AiPDF",
+      "signtoolOptions": {
+        "publisherName": "Manjay Dongol"
+      }
     },
     "nsis": {
       "oneClick": false,

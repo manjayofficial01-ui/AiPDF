@@ -1,0 +1,22 @@
+AiPDF Editor
+============
+
+Product        : AiPDF Editor
+Version        : 2.26.0
+Author         : Manjay Dongol
+Publisher      : Manjay Dongol
+Website        : https://github.com/manjayofficial01-ui/AiPDF
+Source code    : https://github.com/manjayofficial01-ui/AiPDF
+Issues         : https://github.com/manjayofficial01-ui/AiPDF/issues
+License        : MIT License
+Copyright      : Copyright (c) 2026 Manjay Dongol
+
+The full MIT licence text is in LICENSE.txt in this folder, and is also
+available inside the application from Help > License & attribution.
+
+This application is built with Electron, pdf.js, pdf-lib and other open-source
+components. Those components keep their own licences; see the project README
+for the dependency list. AiPDF Editor itself is distributed under the MIT
+License, with the exact attribution shown above so that security and
+antivirus products can identify the publisher, the source and the licence of
+this executable without guessing.

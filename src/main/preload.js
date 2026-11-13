@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld('api', {
   /** Mark a drag & dropped file as openable/saveable (see fs:grantDrop). */
   grantDroppedFile: (filePath) => ipcRenderer.invoke('fs:grantDrop', filePath),
   fileExists: (filePath) => ipcRenderer.invoke('fs:exists', filePath),
+  /** size + mtime for the PDF thumbnail cache key; same grants as readFile. */
+  fileStat: (filePath) => ipcRenderer.invoke('fs:stat', filePath),
+  /** Allowlisted external links only (project website / Windows default apps). */
+  openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   /** Previous saved revision of a document, if a .bak of it exists. */
   backupInfo: (filePath) => ipcRenderer.invoke('fs:backup-info', filePath),
   restoreBackup: (filePath) => ipcRenderer.invoke('fs:restore-backup', filePath),

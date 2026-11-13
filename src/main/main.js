@@ -592,6 +592,24 @@ ipcMain.handle('app:path', (_e, name) => {
   }
 });
 
+/**
+ * Only three destinations can be opened from the renderer: the project's own
+ * GitHub page, its issue tracker, and the Windows "Default apps" settings
+ * page (Help ▸ Make AiPDF your default PDF app). A crafted PDF must never be
+ * able to make the app launch an arbitrary URI scheme.
+ */
+const EXTERNAL_ALLOW = new Set([
+  'https://github.com/manjayofficial01-ui/AiPDF',
+  'https://github.com/manjayofficial01-ui/AiPDF/issues',
+  'ms-settings:defaultapps',
+]);
+ipcMain.handle('app:openExternal', (_e, url) => {
+  const u = String(url || '');
+  if (!EXTERNAL_ALLOW.has(u)) return false;
+  try { Promise.resolve(shell.openExternal(u)).catch(() => {}); } catch { return false; }
+  return true;
+});
+
 ipcMain.handle('dialog:open', async (_e, opts = {}) => {
   const res = await dialog.showOpenDialog(win, {
     properties: opts.multiSelections ? ['openFile', 'multiSelections'] : ['openFile'],
@@ -706,6 +724,22 @@ ipcMain.handle('fs:grantDrop', (_e, filePath) => {
 
 /** Existence probe (the font tests use it); same grant rules as fs:read. */
 ipcMain.handle('fs:exists', (_e, filePath) => pathGranted(filePath) && fs.existsSync(filePath));
+
+/**
+ * Size + modification time, used as the cache key for in-app PDF page-one
+ * thumbnails. A timestamp means an edited file gets a fresh preview without
+ * having to hash or re-render every document on each start page visit.
+ * Same grant rules as fs:read — no arbitrary path can be probed.
+ */
+ipcMain.handle('fs:stat', async (_e, filePath) => {
+  if (!pathGranted(filePath)) return null;
+  try {
+    const s = await fs.promises.stat(filePath);
+    return { size: s.size, mtimeMs: Math.round(s.mtimeMs) };
+  } catch {
+    return null;
+  }
+});
 
 /**
  * Delete one file from the user-fonts directory, and nothing else.

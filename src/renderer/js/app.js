@@ -44,6 +44,8 @@ import { convertPdfToWord, docxSelfTest } from './pdf2word.js';
 import { $, el, toast, formatBytes, hexToRgb, rgbToHex, rgbToCss, clamp, initTooltips, uid } from './util.js';
 import { svgIcon } from './icons.js';
 import { showModal, confirmDialog, alertDialog, promptDialog, formRow, contextMenu } from './dialog.js';
+import { showAboutDialog, showLicenseDialog } from './legal.js';
+import { makePdfThumb, forgetPdfThumb } from './thumbnails.js';
 import { openSettingsDialog } from './settings.js';
 // Document Assurance + local version timeline + premium visual state. These
 // only reach back into app.js through dynamic imports inside action handlers,
@@ -2114,10 +2116,14 @@ function renderWelcome() {
   if (settings.recents && settings.recents.length) {
     recents.appendChild(el('div', { class: 'wr-title', text: 'Recent' }));
     settings.recents.slice(0, 7).forEach((r) => {
+      // A real raster of page 1, not a generic file glyph. The placeholder
+      // shows immediately while pdf.js renders in the background.
       const item = el('div', { class: 'wr-item' }, [
-        el('span', { html: svgIcon('file', 14) }),
-        el('span', { class: 'wrn', text: r.name || r.path }),
-        el('span', { class: 'wrp', text: r.path || '' }),
+        makePdfThumb(r.path, 96, 'wr-thumb'),
+        el('span', { class: 'wr-txt' }, [
+          el('span', { class: 'wrn', text: r.name || r.path }),
+          el('span', { class: 'wrp', text: r.path || '' }),
+        ]),
       ]);
       item.onclick = () => openDocFromPath(r.path);
       recents.appendChild(item);
@@ -2155,6 +2161,34 @@ function showWorkspace() {
   $('#welcome').classList.add('hidden');
   $('#pagesScroll').classList.remove('hidden');
   $('#emptyWorkspace').classList.remove('hidden');
+  renderEmptyRecents();
+}
+
+/** The workspace that greets the user at boot also shows recent documents as
+ *  first-page previews, so a PDF is recognisable by its cover before it is
+ *  opened again. Hidden when there are no recents or a document is open. */
+function renderEmptyRecents() {
+  const box = $('#ewRecents');
+  if (!box) return;
+  box.innerHTML = '';
+  const list = (settings.recents || []).slice(0, 4);
+  if (!list.length) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  box.appendChild(el('div', { class: 'ew-rec-title', text: 'Recent documents' }));
+  const grid = el('div', { class: 'ew-rec-grid' });
+  for (const r of list) {
+    const card = el('button', {
+      class: 'ew-rec',
+      type: 'button',
+      title: r.path || '',
+    }, [
+      makePdfThumb(r.path, 128, 'ew-rec-thumb'),
+      el('span', { class: 'ew-rec-name', text: r.name || r.path || '' }),
+    ]);
+    card.onclick = () => openDocFromPath(r.path);
+    grid.appendChild(card);
+  }
+  box.appendChild(grid);
 }
 
 /** Leave the empty-workspace card (a document is being shown). */
@@ -5087,6 +5121,9 @@ export const COMMANDS = [
   ['Export', 'Export text…', 'download', 'export:text'],
   ['Export', 'Export pages as images…', 'image', 'export:images'],
   ['Export', 'Export comments…', 'comments', 'export:comments'],
+  ['Help', 'About AiPDF Editor', 'info', 'help:about'],
+  ['Help', 'License & attribution', 'file', 'help:license'],
+  ['Help', 'Make AiPDF your default PDF app…', 'settings', 'help:defaultApp'],
 ];
 
 /** Every command the palette can run. The tools are derived from the TOOL
@@ -5681,6 +5718,9 @@ export async function onMenuAction(action, payload) {
     }
     case 'file:openRecent': if (payload) await openDocFromPath(payload); break;
     case 'recents:clear': {
+      // Drop the cached page-1 rasters too, so clearing Recents really clears
+      // the previews rather than leaving stale images in localStorage.
+      for (const r of settings.recents || []) forgetPdfThumb(r && r.path);
       settings.recents = [];
       saveRecents();
       if (!activeDoc()) {
@@ -6059,7 +6099,22 @@ export async function onMenuAction(action, payload) {
       await showModal({ title: 'Keyboard shortcuts', width: '', body: (b) => { b.appendChild(el('div', { class: 'hint', html: shortcutHelpHtml() })); } });
       break;
     case 'help:about':
-      await alertDialog('AiPDF Editor — a fast, local-first PDF editor with an AI assistant that cites the page it used.\n\nBuilt with Electron, pdf.js and pdf-lib.', { title: 'About' });
+      // Publisher, website and MIT licence are part of the app's identity —
+      // the same values are in the exe version resource and resources/NOTICE.txt.
+      await showAboutDialog(bootInfo && bootInfo.version ? bootInfo.version : '');
+      break;
+    case 'help:license':
+      await showLicenseDialog();
+      break;
+    case 'help:defaultApp':
+      // Windows 10/11 protect the UserChoice hash: only the user can confirm a
+      // default app, so we open the Settings page where AiPDF is listed as a
+      // PDF handler (build.fileAssociations registers it at install time).
+      if (bootInfo && bootInfo.platform === 'win32') {
+        await window.api.openExternal('ms-settings:defaultapps');
+      } else {
+        toast('Choose AiPDF Editor as the default PDF app in your system settings.', 'info', 4000);
+      }
       break;
     default: break;
   }

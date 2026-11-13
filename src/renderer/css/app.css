@@ -1405,6 +1405,66 @@ button.big { --ctl-h: var(--ctl-xl); --ctl-px: var(--space-5); }
   font-size: var(--text-xs); color: var(--text-3);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%;
 }
+
+/* ── PDF content thumbnails ────────────────────────────────────────────
+   A real raster of page 1 replaces the generic file glyph in the Recent
+   lists. The placeholder is visible immediately; thumbnails.js swaps in the
+   raster once pdf.js has rendered it. All colours come from semantic tokens,
+   so the previews work in every palette and in dark / contrast skins. */
+.pdf-thumb {
+  flex: 0 0 auto;
+  display: grid; place-items: center;
+  position: relative; overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--elev-1);
+  color: var(--text-3);
+}
+.pdf-thumb .pdf-thumb-ph { display: grid; place-items: center; width: 100%; height: 100%; }
+.pdf-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top center; }
+.pdf-thumb.ready { background: #fff; }
+
+.wr-thumb { width: 34px; height: 44px; }
+.wr-item .wr-txt {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.wr-item .wr-txt .wrp { max-width: none; }
+
+.ew-recents { margin-top: var(--space-5); text-align: left; }
+.ew-rec-title {
+  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .6px;
+  color: var(--text-3); font-weight: var(--weight-semibold);
+  margin-bottom: var(--space-2);
+}
+.ew-rec-grid {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.ew-rec {
+  /* Chromium's UA sets align-items:flex-start on buttons; without an explicit
+     override the preview collapses to a 2px stripe. */
+  align-items: stretch;
+  display: flex; flex-direction: column; gap: var(--space-15);
+  min-width: 0; padding: var(--space-15);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elev-1);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out);
+}
+.ew-rec:hover { background: var(--tool-hover); border-color: var(--accent-solid); }
+.ew-rec-thumb { width: 100%; height: 88px; }
+.ew-rec-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  text-align: center; font-size: var(--text-xs); color: var(--text-1);
+}
+@media (max-width: 700px) {
+  .ew-rec-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .welcome-features { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--space-2); text-align: left; }
 .wf {
   display: flex; gap: var(--space-2);
@@ -3362,5 +3422,52 @@ body.density-compact .rbtn.large .rlabel { font-size: 10px; max-width: 58px; }
   text-align: center;
   color: var(--text-3);
   font-size: var(--text-sm);
+}
+
+/* ── Help ▸ About / License & attribution ──────────────────────────────────
+   Publisher, website and the full MIT terms are visible in-app, mirroring the
+   executable's version resource and resources/NOTICE.txt. A long modal body
+   is a flex column, so every direct child pins `flex: 0 0 auto` to avoid the
+   licence text being squeezed to a thin stripe. */
+.lg-about, .lg-facts, .lg-lic-head, .lg-lic-text { flex: 0 0 auto; }
+.lg-brand { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); }
+.lg-mark {
+  width: 44px; height: 44px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  border-radius: var(--radius-md);
+  background: var(--brand-mark); color: var(--accent-text);
+  font-size: var(--text-xl); font-weight: var(--weight-semibold);
+}
+.lg-brand-txt { min-width: 0; }
+.lg-name { font-size: var(--text-lg); font-weight: var(--weight-semibold); color: var(--text-1); }
+.lg-ver { font-size: var(--text-xs); color: var(--text-3); margin-top: 2px; }
+.lg-desc {
+  margin: 0; line-height: 1.55; color: var(--text-2);
+  font-size: var(--text-sm); user-select: text;
+}
+.lg-facts {
+  margin-top: var(--space-3);
+  display: grid; grid-template-columns: 96px minmax(0, 1fr);
+  gap: 6px var(--space-3);
+}
+.lg-key {
+  font-size: var(--text-xs); color: var(--text-3);
+  text-transform: uppercase; letter-spacing: .4px; padding-top: 2px;
+}
+.lg-val {
+  font-size: var(--text-sm); color: var(--text-1);
+  overflow-wrap: anywhere; user-select: text;
+}
+.lg-link { color: var(--accent-ink); text-decoration: underline; cursor: pointer; }
+.lg-lic-head { font-size: var(--text-sm); color: var(--text-2); margin-bottom: var(--space-2); }
+.lg-lic-text {
+  margin: 0; padding: var(--space-3);
+  max-height: 42vh; overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono); font-size: var(--text-xs);
+  line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  color: var(--text-1); user-select: text;
 }
 

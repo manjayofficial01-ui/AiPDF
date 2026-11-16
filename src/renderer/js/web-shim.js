@@ -234,7 +234,11 @@
         home: '',
         settings: {},
         dev: false,
-        chrome: { overlayHeight: 0, captionWidth: 0 }, // no window chrome to reserve space for
+        // The in-page title bar needs the same reserved height as the desktop
+        // overlay (TITLEBAR_OVERLAY_HEIGHT in main.js) or its content is
+        // clipped to zero; captionWidth is 0 because a browser tab has no
+        // Windows caption buttons to keep clear.
+        chrome: { overlayHeight: 36, captionWidth: 0 },
       };
     },
 
@@ -481,4 +485,47 @@
 
   // Mark the edition for diagnostics and let anyone verify the shim loaded.
   window.AIPDF_WEB = true;
+
+  /* ── Web-only chrome: full-screen toggle in the title bar ─────────────── */
+  // The desktop build reaches Full Screen through the native menu (Electron's
+  // `togglefullscreen` role); a web page has no menu bar, so give the title
+  // bar its own button. Same icon-btn look as its neighbours; viewing and
+  // editing keep working unchanged, the app simply fills the screen.
+  function initFullscreenButton() {
+    const bar = document.querySelector('.titlebar .tb-right');
+    if (!bar || document.getElementById('btnFullscreen')) return;
+    const EXPAND = 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5';
+    const COMPRESS = 'M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5';
+    const svg = (d) => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="${d}"/></svg>`;
+    const root = document.documentElement;
+    const request = root.requestFullscreen || root.webkitRequestFullscreen;
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (!request) return; // very old browser: F11 may still work natively
+    const btn = document.createElement('button');
+    btn.className = 'icon-btn';
+    btn.id = 'btnFullscreen';
+    btn.type = 'button';
+    const setIcon = () => {
+      const on = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      btn.innerHTML = svg(on ? COMPRESS : EXPAND);
+      btn.title = on ? 'Exit full screen (Esc)' : 'Full screen';
+      btn.setAttribute('aria-label', btn.title);
+    };
+    btn.addEventListener('click', () => {
+      const on = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      try {
+        if (on) (exit || (() => {})).call(document);
+        else request.call(root);
+      } catch { /* embedded contexts can refuse; keep the app usable */ }
+    });
+    document.addEventListener('fullscreenchange', setIcon);
+    document.addEventListener('webkitfullscreenchange', setIcon);
+    setIcon();
+    bar.insertBefore(btn, document.getElementById('btnTheme') || bar.querySelector('.tb-spacer-native'));
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initFullscreenButton, { once: true });
+  } else {
+    initFullscreenButton();
+  }
 })();

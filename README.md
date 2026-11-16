@@ -1,5 +1,9 @@
 ﻿# AiPDF Editor
 
+[![Use AiPDF Editor online in your browser — no install](https://img.shields.io/badge/Use_it_online-no_install_needed-2563eb?style=for-the-badge&logo=googlechrome&logoColor=white)](https://aipdf-editor-swart.vercel.app)
+
+**🌐 The whole editor also runs in your browser, free: [aipdf-editor-swart.vercel.app](https://aipdf-editor-swart.vercel.app)** — open it, drag in a PDF, edit, save back to your computer. Nothing is uploaded, nothing is installed. Works on Windows, macOS, Linux and ChromeOS. ([What's different on the web](#aipdf-editor-web))
+
 A modern, Electron‑based PDF **viewer and editor** for Windows — one fast,
 local‑first desktop app that studies the category leaders (Adobe Acrobat,
 Foxit, PDFelement, Nitro PDF, and PDF‑XChange) and integrates the capabilities

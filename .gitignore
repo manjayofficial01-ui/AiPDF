@@ -6,8 +6,12 @@ dist*/
 .superpowers/
 .workbuddy-ai/
 pdf2word-max/
+web-dist/
+.vercel/
 *.log
 .DS_Store
 .scratch/
 vendor/thumbnail/*.pdb
 vendor/thumbnail/*.lib
+.vercel
+.env*

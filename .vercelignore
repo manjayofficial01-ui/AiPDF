@@ -1,0 +1,25 @@
+# The Vercel build installs its own dependencies (vercel.json installCommand)
+# and only needs: src/, scripts/build-web.mjs, api/, vendor/tessdata,
+# package.json + lockfile, vercel.json. Everything else stays local.
+node_modules
+web-dist
+dist-build
+dist-build37
+dist-build38
+dist-build39
+pdf2word-max
+.smoke
+.fixtures
+.spike
+.superpowers
+.workbuddy-ai
+.scratch
+.zwork
+.github
+screenshots
+docs
+assets
+vendor/thumbnail
+vendor/tesseract
+INSTALL.md
+Start AiPDF Editor.bat

@@ -79,6 +79,7 @@
     "test:thumbnail": "node scripts/thumbnail-test.mjs",
     "test:thumbshell": "node scripts/thumb-provider-test.mjs",
     "build:thumb": "node scripts/build-thumb-provider.mjs",
+    "build:web": "node scripts/build-web.mjs",
     "test:icon": "node scripts/icon-pack-test.mjs",
     "dist": "electron-builder --win --x64",
     "test:pdf2word": "node scripts/pdf2word-test.mjs",

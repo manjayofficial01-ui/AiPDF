@@ -28,6 +28,51 @@ plan and nothing changes until you approve it.
 > every command is written out for you, from downloading the ready-made
 > installer to a one-double-click start.
 
+> **🌐 Or don't install anything at all:** the same editor runs in your browser
+> at **[aipdf-editor-swart.vercel.app](https://aipdf-editor-swart.vercel.app)**
+> — no download, no installer, works on Windows, macOS, Linux and ChromeOS.
+> Files are opened and saved on your own machine; nothing is uploaded.
+> See [AiPDF Editor Web](#aipdf-editor-web) for how it works and what differs
+> from the desktop build.
+
+---
+
+## AiPDF Editor Web
+
+The renderer was already a browser application (ES modules served over local
+HTTP by the desktop shell), so the online edition is the **same codebase and
+the same interface** — not a rewrite:
+
+| Piece | File | Role |
+| --- | --- | --- |
+| Browser bridge | `src/renderer/js/web-shim.js` | Installs a browser `window.api` when the Electron preload has not already provided one. File open/save via the **File System Access API** (download fallback), settings in `localStorage`, uploaded fonts in **IndexedDB**, AI/TTS calls from the browser. Under Electron it exits at once, so one `index.html` serves both editions. |
+| Same-origin relay | `api/proxy.js` | A Vercel function used only when a provider does not send CORS headers (the desktop app has the same proxy in its main process). https-only, public hosts only, GET/POST only, 32 MB cap — it forwards your call to **your** chosen endpoint with **your** key. |
+| Build | `scripts/build-web.mjs` | Assembles `web-dist/`: the renderer plus the vendored pdf.js / pdf-lib / Tesseract libraries at the same `/v/…` routes the desktop server uses. |
+
+**Privacy model (same as the desktop app):** your PDFs are parsed, edited,
+redacted and OCR'd entirely inside your browser tab. A file leaves the browser
+only when (a) you save/download it, or (b) you configure an AI or read-aloud
+provider with your own key and approve the egress prompt.
+
+**What differs from the Windows desktop build** — the things that need a
+native shell:
+
+- No Explorer thumbnail DLL or file associations (meaningless in a browser).
+- No system-font scan; use **upload font** in the Format panel (uploaded TTF/OTF
+  fonts persist in your browser across reloads).
+- No `.bak` previous-version restore — export a copy before risky edits instead.
+- Recents remember documents but cannot reopen them after a reload unless you
+  re-pick the file (browsers cannot touch disk paths).
+- Printing uses the browser print dialog.
+
+**Run or deploy it yourself:**
+
+```bash
+npm run build:web        # assemble web-dist/
+npx serve web-dist       # try it locally
+vercel deploy --prod     # deploy (project config is in vercel.json)
+```
+
 ---
 
 ## Publisher, website & licence

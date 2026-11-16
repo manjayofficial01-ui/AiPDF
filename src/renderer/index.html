@@ -216,6 +216,10 @@
 <div id="overlayRoot"></div>
 <div id="toastRoot" class="toast-root" role="status" aria-live="polite"></div>
 
+<!-- Web edition bridge: installs a browser window.api when the Electron
+     preload has not already provided one. Under Electron this exits at once,
+     so both editions share this exact file. -->
+<script src="/js/web-shim.js"></script>
 <script type="module" src="/js/app.js"></script>
 </body>
 </html>

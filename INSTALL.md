@@ -21,6 +21,26 @@ program and copy/paste a line of text, you can do this.
 
 ---
 
+## Option 0 — No install at all: use AiPDF in your browser
+
+Before anything else, know that you can use most of AiPDF Editor **without
+installing anything**:
+
+1. Open your browser (Chrome, Edge, Firefox — anything modern).
+2. Go to **<https://aipdf-editor-swart.vercel.app>**
+3. Drag a PDF into the page (or use the open button) and start working.
+
+That is the whole "installation". Your documents are processed **inside your
+own browser** — they are not uploaded anywhere. When you save, the finished
+file is downloaded to your computer like any other download.
+
+> Use the browser version for quick edits on any computer (including Mac and
+> Linux). Install the Windows app below when you want Explorer thumbnails,
+> system fonts, previous-version backups, and the fastest performance on your
+> own machine.
+
+---
+
 ## Two ways to get the app
 
 | | **Option A — the ready-made installer** | **Option B — run it from the source code** |

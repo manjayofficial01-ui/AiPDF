@@ -222,14 +222,134 @@
     return out;
   }
 
+  /* ── Anna host (the Anna App iframe) ────────────────────────────────── */
+
+  // Inside the Anna dashboard (anna.partners) this bundle is iframed with
+  // ?wid=…&t=…. The Anna App SDK is imported from the host at runtime and the
+  // built-in "Anna" provider (baseUrl anna://host) routes every AI call to
+  // the host LLM through anna.llm.complete — no API key, billed to the
+  // signed-in user's Anna credits. Everything here is inert outside Anna.
+  const ANNA_BASE = 'anna://host';
+  const ANNA_MODEL_LABEL = 'Anna host model';
+  const IS_ANNA_HOST = (() => {
+    try { return new URLSearchParams(location.search).has('wid'); } catch { return false; }
+  })();
+
+  let annaRuntime = null;
+  let annaRuntimePromise = null;
+  function annaConnect() {
+    if (annaRuntimePromise) return annaRuntimePromise;
+    annaRuntimePromise = (async () => {
+      const mod = await import('/static/anna-apps/_sdk/latest/index.js');
+      annaRuntime = await mod.AnnaAppRuntime.connect();
+      window.ANNA_RUNTIME = annaRuntime;
+      return annaRuntime;
+    })().catch((err) => { annaRuntimePromise = null; throw err; });
+    return annaRuntimePromise;
+  }
+  if (IS_ANNA_HOST) {
+    window.AIPDF_ANNA = true;
+    annaConnect().catch(() => { /* the AI dialog surfaces the error on first use */ });
+  }
+
+  /** OpenAI-shaped message → Anna message ({role, content:{type,text}|blocks}). */
+  function annaMapMessage(m) {
+    if (!m || typeof m !== 'object') return null;
+    const role = m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user';
+    const c = m.content;
+    if (typeof c === 'string') return { role, content: { type: 'text', text: c } };
+    if (!Array.isArray(c)) return null;
+    const blocks = [];
+    for (const part of c) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.type === 'text' && typeof part.text === 'string') blocks.push({ type: 'text', text: part.text });
+      else if (part.type === 'image_url') {
+        const url = part.image_url && part.image_url.url;
+        // Anna accepts a full data: URI in the image block's `data` field.
+        if (typeof url === 'string' && url.startsWith('data:')) blocks.push({ type: 'image', data: url });
+      }
+    }
+    if (!blocks.length) return null;
+    return { role, content: blocks.length === 1 && blocks[0].type === 'text' ? blocks[0] : blocks };
+  }
+
+  /** Fold system messages into the first user turn (older Anna hosts reject
+   *  the system role; the retry path in annaChat uses this as the fallback). */
+  function annaMergeSystem(messages) {
+    const sys = [];
+    for (const m of messages) {
+      if (m.role !== 'system') continue;
+      for (const p of (Array.isArray(m.content) ? m.content : [m.content])) {
+        if (p && p.type === 'text' && p.text) sys.push(p.text);
+      }
+    }
+    const rest = messages.filter((m) => m.role !== 'system');
+    if (!sys.length || !rest.length) return rest;
+    const first = rest[0];
+    const prefix = sys.join('\n\n') + '\n\n';
+    let head;
+    if (Array.isArray(first.content)) {
+      head = [{ type: 'text', text: prefix + first.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n') }]
+        .concat(first.content.filter((b) => b.type !== 'text'));
+    } else {
+      head = { type: 'text', text: prefix + first.content.text };
+    }
+    return [{ ...first, role: 'user', content: head }].concat(rest.slice(1));
+  }
+
+  function annaErrorText(err) {
+    const code = err && err.code ? String(err.code) : '';
+    const raw = String((err && (err.message || err)) || err || 'AI request failed').slice(0, 300);
+    if (code === 'quota_exceeded') return 'Anna quota exceeded — top up your Anna credits or pick another AI provider in Settings.';
+    if (code === 'not_implemented') return 'The Anna host model is not available in this environment.';
+    if (code === 'permission_denied') return 'Anna denied this call — reinstall the AiPDF Editor app from the Anna App Store.';
+    return raw;
+  }
+
+  async function annaChat(opts) {
+    try {
+      const rt = await annaConnect();
+      const body = opts.body && typeof opts.body === 'object' ? opts.body : {};
+      const messages = (Array.isArray(body.messages) ? body.messages : [])
+        .map(annaMapMessage).filter(Boolean);
+      if (!messages.length) return { ok: false, error: 'Empty AI request.' };
+      let reply;
+      try {
+        reply = await rt.llm.complete({ messages });
+      } catch (err) {
+        // Older hosts reject the system role — fold it into the first user turn.
+        if (/role|system/i.test(String((err && (err.message || err)) || err))) {
+          reply = await rt.llm.complete({ messages: annaMergeSystem(messages) });
+        } else {
+          throw err;
+        }
+      }
+      const text = reply && reply.content && typeof reply.content.text === 'string' ? reply.content.text : '';
+      // Streaming callers get the finished answer as one delta; the dock's
+      // loading state resolves exactly as it does for non-streaming providers.
+      if (opts.stream && streamHandler && text) streamHandler({ reqId: opts.reqId, delta: text, text });
+      return { ok: true, text };
+    } catch (err) {
+      return { ok: false, error: annaErrorText(err) };
+    }
+  }
+
   /* ── the bridge ───────────────────────────────────────────────────────── */
 
   window.api = {
     async boot() {
+      // First run inside Anna: default the AI provider to the host model so
+      // the assistant works with zero configuration. A provider the user has
+      // already saved is always respected (loadSettings merges this over the
+      // built-in defaults, which point at OpenAI).
+      const savedAi = store.settings && store.settings.ai ? store.settings.ai : null;
+      const annaAi = IS_ANNA_HOST && !(savedAi && savedAi.provider)
+        ? { provider: 'anna', baseUrl: ANNA_BASE, model: ANNA_MODEL_LABEL, authMode: 'none', apiKey: '' }
+        : null;
       return {
         startupPath: null,
         testMode: false,
-        version: '2.26.0-web',
+        version: IS_ANNA_HOST ? '2.26.0-anna' : '2.26.0-web',
         platform: 'web',
         home: '',
         settings: {},
@@ -239,6 +359,7 @@
         // clipped to zero; captionWidth is 0 because a browser tab has no
         // Windows caption buttons to keep clear.
         chrome: { overlayHeight: 36, captionWidth: 0 },
+        settings: annaAi ? { ai: annaAi } : {},
       };
     },
 
@@ -362,6 +483,9 @@
     /* ── AI (models / chat / stream) ─────────────────────────────────────── */
 
     async aiModels(opts = {}) {
+      if (String(opts.url || '').startsWith(ANNA_BASE)) {
+        return { ok: true, models: [ANNA_MODEL_LABEL] };
+      }
       try {
         // Same pagination the desktop proxy runs: Gemini pages at 50/1000,
         // OpenAI-compatible gateways may use `after`/`has_more`.
@@ -401,6 +525,7 @@
     },
 
     async aiChat(opts = {}) {
+      if (String(opts.url || '').startsWith(ANNA_BASE)) return annaChat(opts);
       try {
         if (!/^https?:/i.test(String(opts.url || ''))) return { ok: false, error: 'The chat endpoint must be an http(s) URL.' };
         const res = await providerFetch(opts);

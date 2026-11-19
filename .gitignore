@@ -15,3 +15,7 @@ vendor/thumbnail/*.pdb
 vendor/thumbnail/*.lib
 .vercel
 .env*
+
+# Anna App generated bundle + local dev registration
+anna-app/aipdf-editor/bundle/
+anna-app/*/.anna/

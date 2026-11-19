@@ -1,0 +1,37 @@
+{
+  "schema": 4,
+  "tags": ["pdf", "editor", "ocr", "ai", "productivity"],
+  "system_prompt_addendum": "AiPDF Editor is a complete in-browser PDF editor. When the user mentions this app, open the 'main' view so they can work on their PDF directly. The app views, comments, edits text and objects, organizes pages, fills forms, encrypts, redacts (verified), OCRs scans (English/Nepali/Hindi, offline), runs forensics and accessibility checks, and reads documents aloud. Its AI features — summarize, translate, proofread, document Q&A with [p.N] citations, contract review, smart redaction, AI outline and AI-vision OCR — call Anna's host model on the user's behalf and consume the user's Anna credits. The user's PDF itself is processed entirely inside the app window and never uploaded; only text the user explicitly sends to an AI feature goes to the host model. If asked how to do something to a PDF, prefer doing it in the app over explaining manual steps.",
+  "ui": {
+    "bundle": {
+      "format": "static-spa",
+      "entry": "index.html",
+      "external_origins": []
+    },
+    "browser_permissions": ["fullscreen"],
+    "views": [
+      {
+        "name": "main",
+        "title": "AiPDF Editor",
+        "default": true,
+        "min_size": { "w": 1000, "h": 600 },
+        "default_size": { "w": 1440, "h": 900 },
+        "single_instance": true
+      }
+    ],
+    "csp_overrides": {
+      "script-src": ["'wasm-unsafe-eval'"]
+    },
+    "state_merge": "last_writer_wins"
+  },
+  "dev": {
+    "mocks": {
+      "llm.complete": {
+        "result": {
+          "role": "assistant",
+          "content": { "type": "text", "text": "Mock reply from the Anna host model (local dev harness)." }
+        }
+      }
+    }
+  }
+}

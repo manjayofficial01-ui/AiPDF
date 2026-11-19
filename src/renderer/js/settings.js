@@ -339,8 +339,20 @@ function buildAI(W) {
   cfg.onclick = () => W.call('configureAI');
   g.appendChild(row('Model setup', cfg));
 
+  // Inside the Anna host the platform model is offered as a provider; picking
+  // it also pins the connection fields the web-shim expects (anna:// base).
+  const setAIProvider = (v) => {
+    W.setSub('ai', 'provider')(v);
+    if (v === 'anna') {
+      W.setSub('ai', 'baseUrl')('anna://host');
+      W.setSub('ai', 'model')('Anna host model');
+      W.setSub('ai', 'authMode')('none');
+      W.setSub('ai', 'apiKey')('');
+    }
+  };
   g.appendChild(row('Provider',
     select(valSub('ai', 'provider'), [
+      ...(window.AIPDF_ANNA ? [['anna', 'Anna (host AI)']] : []),
       ['openai', 'OpenAI'],
       ['gemini', 'Google Gemini'],
       ['openrouter', 'OpenRouter'],
@@ -351,7 +363,7 @@ function buildAI(W) {
       ['ollama', 'Ollama'],
       ['lmstudio', 'LM Studio'],
       ['custom', 'Custom'],
-    ], W.setSub('ai', 'provider'))));
+    ], setAIProvider)));
   g.appendChild(row('Base URL',
     textInput(valSub('ai', 'baseUrl'), { placeholder: 'https://api.openai.com/v1' }, W.setSub('ai', 'baseUrl'))));
   g.appendChild(row('Model',

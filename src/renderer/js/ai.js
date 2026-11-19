@@ -26,6 +26,7 @@ export function aiReady() {
 export function aiStatusLabel() {
   const a = settings.ai || {};
   if (!aiReady()) return { text: 'AI off', cls: '' };
+  if (a.provider === 'anna') return { text: 'AI: Anna', cls: 'on' };
   const local = /localhost|127\.0\.0\.1|ollama/i.test(a.baseUrl || '');
   return { text: local ? 'AI: local' : `AI: ${a.model || 'model'}`, cls: local ? 'local' : 'on' };
 }
@@ -1350,6 +1351,10 @@ export async function configureAI(firstTime = false) {
   a.customHeaders = (settings.ai.customHeaders || []).map((c) => ({ ...c }));
 
   const presets = [
+    // Inside the Anna host the platform model is offered first: no key — the
+    // call rides the App SDK to anna.llm.complete and bills the user's own
+    // Anna credits. The web-shim intercepts the anna:// base URL.
+    ...(window.AIPDF_ANNA ? [{ label: 'Anna (host AI — no key needed)', provider: 'anna', baseUrl: 'anna://host', model: 'Anna host model', authMode: 'none' }] : []),
     { label: 'OpenAI', provider: 'openai', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', authMode: 'bearer' },
     { label: 'Google Gemini', provider: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.5-flash', authMode: 'x-goog-api-key' },
     { label: 'OpenRouter', provider: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini', authMode: 'bearer',

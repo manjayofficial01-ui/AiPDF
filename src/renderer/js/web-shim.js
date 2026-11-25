@@ -442,7 +442,7 @@
       return {
         startupPath: null,
         testMode: false,
-        version: IS_ANNA_HOST ? '2.26.0-anna' : '2.26.0-web',
+        version: IS_ANNA_HOST ? '2.27.0-anna' : '2.27.0-web',
         platform: 'web',
         home: '',
         settings: {},

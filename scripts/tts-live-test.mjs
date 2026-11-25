@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * TTS + local-fonts live check — boots the real app over CDP and verifies:
@@ -19,10 +20,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const OUT = path.join(ROOT, '.smoke');
-const PORT = 9418;
+const PORT = await freePort();
 fs.mkdirSync(OUT, { recursive: true });
 
 // Per-run userData: the shared profile can keep the renderer stuck mid-boot
@@ -31,7 +32,7 @@ const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-tts-live-test-'));
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`, FIXTURE], { cwd: ROOT, env: childEnv });
+const child = launchElectron(['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`, FIXTURE], { cwd: ROOT, env: childEnv });
 child.stderr.on('data', () => {});
 
 const target = await (async () => {

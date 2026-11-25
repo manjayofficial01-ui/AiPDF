@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Rendered regression gate for the 2026-11-11 UI/UX audit fixes.
@@ -22,7 +23,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const OUT = path.join(ROOT, '.smoke', 'ux-audit');
 fs.mkdirSync(OUT, { recursive: true });
@@ -38,7 +39,7 @@ const PORT = await freePort();
 const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-ux-verify-'));
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`], { cwd: ROOT, env });
+const child = launchElectron(['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 process.on('exit', () => { try { child.kill(); } catch {} });

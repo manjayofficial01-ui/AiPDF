@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Appearance v2.26 — colour themes + complete native tool catalogue.
@@ -94,12 +95,12 @@ const freePort = () => new Promise((resolve, reject) => {
   s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
 });
 const PORT = await freePort();
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-appearance-'));
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`], { cwd: ROOT, env });
+const child = launchElectron(['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 

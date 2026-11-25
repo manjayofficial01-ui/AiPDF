@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron } from './lib/electron-harness.mjs';
 /**
  * Real-world check of the Edit image marquee on a supplied PDF.
  *
@@ -29,7 +30,7 @@ function freePort() {
 }
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const SRC = process.argv[2];
 const PAGE = Number(process.argv[3] || 0);
 if (!SRC || !fs.existsSync(SRC)) { console.log('FAIL missing pdf: node scripts/real-marquee-check.mjs <file.pdf>'); process.exit(1); }
@@ -42,7 +43,7 @@ const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-real-ud-'));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', COPY, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
+const child = launchElectron(['.', COPY, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stderr.on('data', () => {}); child.stdout.on('data', () => {});
 setTimeout(() => { console.log('TIMEOUT'); try { child.kill(); } catch { /* gone */ } process.exit(2); }, 180000).unref?.();
 

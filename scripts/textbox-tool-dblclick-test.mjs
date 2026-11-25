@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Double-clicking the Text box tool re-opens the selected box for typing.
@@ -23,7 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 
 if (!fs.existsSync(ELECTRON)) { console.log('TBDBL_FAIL missing electron'); process.exit(1); }
@@ -42,7 +43,7 @@ const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
 const args = ['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`];
 if (fs.existsSync(FIXTURE)) args.splice(1, 0, FIXTURE);
-const child = spawn(ELECTRON, args, { cwd: ROOT, env });
+const child = launchElectron(args, { cwd: ROOT, env });
 child.stdout.on('data', () => {}); child.stderr.on('data', () => {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const bail = setTimeout(() => { console.log('TIMEOUT'); try { child.kill(); } catch { /* gone */ } process.exit(2); }, 180000);

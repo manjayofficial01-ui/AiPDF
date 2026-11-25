@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Live check for "Add a font from this computer": the picker must list real
@@ -15,9 +16,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
-const PORT = 9423;
+const PORT = await freePort();
 // Every CDP suite gets its own userData. The shared profile can carry an old
 // settings.json / a stale IndexedDB, and the renderer then never finishes
 // booting — which this test used to report as seven unrelated UI failures.
@@ -25,7 +26,7 @@ const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-sysfont-'));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
+const child = launchElectron(['.', `--user-data-dir=${PROFILE}`, FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

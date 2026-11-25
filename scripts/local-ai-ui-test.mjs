@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron } from './lib/electron-harness.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-local-ai-ui-'));
 const profile = path.join(temp, 'profile');
@@ -23,7 +24,7 @@ async function freePort() {
 const port = await freePort();
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`], {
+const child = launchElectron(['.', FIXTURE, `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`], {
   cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'],
 });
 child.stdout.on('data', () => {});

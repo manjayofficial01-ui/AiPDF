@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 /**
  * Diagnostic probe for the local OCR engine loading path.
  *
@@ -31,10 +32,10 @@ function packagedExe() {
 const PACKAGED_EXE = packagedExe();
 const ELECTRON = PACKAGED_EXE && process.env.AIPDF_TARGET === 'packaged'
   ? PACKAGED_EXE
-  : path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+  : electronPath();
 const EXTRA_ARGS = ELECTRON === PACKAGED_EXE ? [] : ['.'];
 const FIXTURE = path.join(ROOT, '.fixtures', 'scan.pdf');
-const PORT = 9471;
+const PORT = await freePort();
 // Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
 // trip the safe-delete bulk guard; they also inherit another suite settings.
 const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-ocr-diag-ud-"));
@@ -42,7 +43,7 @@ const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-ocr-diag-ud-"));
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
 
-const child = spawn(ELECTRON, [...EXTRA_ARGS, FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
+const child = launchElectron([...EXTRA_ARGS, FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env, executable: ELECTRON });
 console.log(`DIAG target: ${ELECTRON === PACKAGED_EXE ? 'PACKAGED' : 'DEV'} -> ${ELECTRON}`);
 child.stdout.on('data', (d) => process.stdout.write(`[main] ${d}`));
 child.stderr.on('data', (d) => process.stdout.write(`[main!] ${d}`));

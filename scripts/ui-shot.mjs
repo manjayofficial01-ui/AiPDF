@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Capture real screenshots of the running app for visual verification.
@@ -16,10 +17,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const OUT = path.resolve(ROOT, process.argv[2] || '.smoke');
-const PORT = 9412;
+const PORT = await freePort();
 
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -31,7 +32,7 @@ const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE; // would make require('electron') return the Node binding
 // windowsHide must NOT be set: it makes Windows create the child window hidden,
 // and a hidden window produces no frames to capture.
-const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`, FIXTURE], { cwd: ROOT, env: childEnv });
+const child = launchElectron(['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`, FIXTURE], { cwd: ROOT, env: childEnv });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 

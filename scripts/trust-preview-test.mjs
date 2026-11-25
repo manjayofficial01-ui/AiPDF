@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron } from './lib/electron-harness.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { PDFDocument, StandardFonts, rgb } from '@cantoo/pdf-lib';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-trust-preview-'));
 const originalPath = path.join(temp, 'original.pdf');
 const candidatePath = path.join(temp, 'candidate.pdf');
@@ -37,7 +38,7 @@ async function freePort() {
 const port = await freePort();
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', originalPath, `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`], {
+const child = launchElectron(['.', originalPath, `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`], {
   cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'],
 });
 child.stdout.on('data', () => {});

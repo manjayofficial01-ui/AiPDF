@@ -6,6 +6,7 @@ import net from 'node:net';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { chromePath as discoverChromePath, launchChromium, waitForDevTools, waitForExit } from './lib/electron-harness.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WEB_ROOT = path.join(ROOT, 'web-dist');
@@ -58,22 +59,23 @@ async function freePort() {
   return port;
 }
 
-const chromePath = discoverChrome();
+const chromePath = discoverChromePath();
 if (!chromePath) {
   server.close();
   fs.rmSync(temp, { recursive: true, force: true });
   console.error('WEB_WORKSPACE_FAIL Chrome not found');
   process.exit(1);
 }
-const debugPort = await freePort();
-const chrome = spawn(chromePath, [
+const chrome = launchChromium(chromePath, [
   '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-extensions',
   '--disable-background-networking', '--disable-component-update', '--disable-sync', '--no-pings',
-  `--remote-debugging-port=${debugPort}`, '--remote-debugging-address=127.0.0.1', '--remote-allow-origins=*',
+  '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--remote-allow-origins=*',
   `--user-data-dir=${profile}`, '--window-size=1440,900', 'about:blank',
 ], { stdio: ['ignore', 'pipe', 'pipe'] });
 chrome.stdout.on('data', () => {});
 chrome.stderr.on('data', () => {});
+const devtools = await waitForDevTools(profile, chrome);
+const debugPort = devtools.port;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let target = null;
@@ -185,11 +187,13 @@ try {
   check('workspace deletion removes metadata and stored bytes', deletion.result === true
     && deletion.after === 0 && deletion.readOk === false, JSON.stringify(deletion));
 } finally {
-  send('Browser.close').catch(() => {});
+  await send('Browser.close').catch(() => {});
   try { ws.close(); } catch { /* already closed */ }
-  chrome.kill();
+  chrome.kill('SIGTERM');
+  await waitForExit(chrome, 3000);
+  if (chrome.exitCode == null && chrome.signalCode == null) chrome.kill('SIGKILL');
+  await waitForExit(chrome, 3000);
   server.close();
-  await delay(300);
   fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 

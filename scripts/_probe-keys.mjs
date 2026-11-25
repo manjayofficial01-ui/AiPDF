@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Throwaway diagnostic: why does pressing 'r' not switch to the Rectangle tool?
@@ -13,9 +14,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
-const PORT = 9419;
+const PORT = await freePort();
 
 // Per-run userData: the shared profile can keep the renderer stuck mid-boot
 // and makes consecutive runs depend on each other's persisted state.
@@ -23,7 +24,7 @@ const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-_probe-keys-'));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
+const child = launchElectron(['.', `--user-data-dir=${PROFILE}`, FIXTURE, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

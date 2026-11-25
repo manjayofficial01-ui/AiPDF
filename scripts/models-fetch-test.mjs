@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron } from './lib/electron-harness.mjs';
 /**
  * Model-list fetching — proves the app pulls the *complete* catalogue, not the
  * first page. A local mock provider serves two pages (Gemini nextPageToken and
@@ -16,7 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 if (!fs.existsSync(ELECTRON)) { console.log('MF_FAIL missing electron'); process.exit(1); }
 
 let geminiRequests = 0;
@@ -71,7 +72,7 @@ function freePort() {
 const PORT = await freePort();
 const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-mf-ud-'));
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
+const child = launchElectron(['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {}); child.stderr.on('data', () => {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const bail = setTimeout(() => { console.log('TIMEOUT'); try { child.kill(); } catch {} process.exit(2); }, 180000);

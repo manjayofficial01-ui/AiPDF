@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Capture the redesigned UI surfaces as PNGs for visual verification.
@@ -16,10 +17,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const OUT = path.resolve(ROOT, process.argv[2] || '.smoke/redesign');
-const PORT = 9421;
+const PORT = await freePort();
 // Fresh profile per run: chrome visibility, ribbon tab, theme, tool AND the
 // local version timeline all persist, so a reused profile photographs the
 // previous run's state. A fixed `.smoke/*` dir is also a trap — the safe-delete
@@ -31,7 +32,7 @@ fs.mkdirSync(OUT, { recursive: true });
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
 // windowsHide must NOT be set: a hidden window produces no frames to capture.
-const child = spawn(ELECTRON, ['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`, FIXTURE], { cwd: ROOT, env: childEnv });
+const child = launchElectron(['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`, FIXTURE], { cwd: ROOT, env: childEnv });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 

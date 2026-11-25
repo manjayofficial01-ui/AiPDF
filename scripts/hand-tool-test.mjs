@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Live check for the Hand tool: it must be reachable from the ribbon, show as
@@ -14,9 +15,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
-const PORT = 9421;
+const PORT = await freePort();
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
@@ -27,7 +28,7 @@ delete env.ELECTRON_RUN_AS_NODE;
 // Per-run temp profile: fixed .smoke/ user-data dirs trip the safe-delete bulk
 // guard once Chromium has written 50+ files into them.
 const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-hand-test-ud-'));
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
+const child = launchElectron(['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 /**
  * Dump the OCR lines the app recognises for the real tender PDF to
  * .fixtures/real-ocr-lines.json — so the pure table-split pipeline can be
@@ -12,15 +13,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FILE = 'D:\\Advertisement\\ad\\Ok\\3\\Sunmoon Media 4x12 Gorakha sadak yojana.pdf';
 const OUT = path.join(ROOT, '.fixtures', 'real-ocr-lines.json');
-const PORT = 9431;
+const PORT = await freePort();
 const UD = path.join(ROOT, '.smoke', 'table-ocr-ud');
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FILE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env: childEnv });
+const child = launchElectron(['.', FILE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env: childEnv });
 child.stderr.on('data', () => {});
 setTimeout(() => { console.log('DUMP_FAIL watchdog'); try { child.kill(); } catch {} process.exit(2); }, 300000).unref?.();
 

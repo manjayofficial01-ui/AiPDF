@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 /**
  * Capture screenshots of the three Foxit-parity panels (Attachments,
  * Signatures, Layers) and the command palette, so the panel UI can be
@@ -13,9 +14,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const OUT = path.resolve(ROOT, process.argv[2] || '.smoke/shots');
-const PORT = 9413;
+const PORT = await freePort();
 
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -27,7 +28,7 @@ const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
 
 async function run(fixture, name) {
-  const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`, path.join(ROOT, '.fixtures', fixture)], { cwd: ROOT, env: childEnv });
+  const child = launchElectron(['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`, path.join(ROOT, '.fixtures', fixture)], { cwd: ROOT, env: childEnv });
   child.stdout.on('data', () => {});
   child.stderr.on('data', () => {});
   let list = null;

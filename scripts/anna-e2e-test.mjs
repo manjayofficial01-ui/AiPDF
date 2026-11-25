@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { chromePath as discoverChromePath, launchChromium } from './lib/electron-harness.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const APP_DIR = path.join(ROOT, 'anna-app', 'aipdf-editor');
@@ -576,7 +577,7 @@ async function main() {
   const replies = readReplies();
   mockReplies = replies;
   validateReplies(replies);
-  const chromePath = discoverChrome();
+  const chromePath = discoverChromePath();
   const annaCli = discoverAnnaCli();
   runNode(path.join(ROOT, 'scripts', 'build-web.mjs'));
   runNode(path.join(ROOT, 'scripts', 'build-anna.mjs'));
@@ -601,7 +602,7 @@ async function main() {
   const configBody = await config.json();
   check('real Anna dev dispatcher serves the aipdf-editor session', configBody.app_slug === 'aipdf-editor');
 
-  chrome = spawn(chromePath, [
+  chrome = launchChromium(chromePath, [
     '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-extensions',
     '--disable-background-networking', '--disable-component-update', '--disable-default-apps',
     '--disable-domain-reliability', '--disable-sync', '--metrics-recording-only', '--no-pings',

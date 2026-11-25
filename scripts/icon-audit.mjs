@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Icon audit — finds every rendered UI icon that is invisible.
@@ -23,9 +24,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
-const PORT = 9414;
+const PORT = await freePort();
 
 // Per-run userData: the shared profile can keep the renderer stuck mid-boot
 // and makes consecutive runs depend on each other's persisted state.
@@ -33,7 +34,7 @@ const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-icon-audit-'));
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE; // would make require('electron') return the Node binding
-const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`, FIXTURE], { cwd: ROOT, env: childEnv });
+const child = launchElectron(['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`, FIXTURE], { cwd: ROOT, env: childEnv });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 

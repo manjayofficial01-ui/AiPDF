@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 /* Live verification of the Edit Image tool: select a placed image, move it,
  * resize from a corner, rotate, fade and delete, then re-read the committed
  * bytes with the native adapter.
@@ -14,9 +15,9 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.smoke', 'image-fixture.pdf');
-const PORT = 9510;
+const PORT = await freePort();
 // A per-run temp user-data dir. A fixed dir under .smoke/ grows past the
 // bulk-delete guard, and then this suite cannot even start a second time.
 const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-imagetool-'));
@@ -34,7 +35,7 @@ const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-imagetool-'));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
+const child = launchElectron(['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stderr.on('data', () => {}); child.stdout.on('data', () => {});
 setTimeout(() => { console.log('TIMEOUT'); try { child.kill(); } catch { /* gone */ } process.exit(2); }, 180000).unref?.();
 

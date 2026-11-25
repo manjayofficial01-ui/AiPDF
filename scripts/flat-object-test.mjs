@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 /**
  * Live verification of the Edit Object tool on a page that LOOKS flat.
  *
@@ -25,9 +26,9 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.smoke', 'flat-object-fixture.pdf');
-const PORT = 9519;
+const PORT = await freePort();
 const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-flat-'));
 
 /* 1. Fixture — page 1: a background image, a smaller image on top of it, and
@@ -67,7 +68,7 @@ const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-flat-'));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
+const child = launchElectron(['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stderr.on('data', () => {}); child.stdout.on('data', () => {});
 setTimeout(() => { console.log('TIMEOUT'); try { child.kill(); } catch { /* gone */ } process.exit(2); }, 180000).unref?.();
 

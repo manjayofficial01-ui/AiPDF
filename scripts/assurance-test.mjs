@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Document Assurance — end-to-end integration suite (Electron + CDP).
@@ -23,9 +24,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
-const PORT = 9431;
+const PORT = await freePort();
 const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-assurance-'));
 const APP_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 
@@ -120,7 +121,7 @@ if (!fs.existsSync(FIXTURE)) {
 }
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, [
+const child = launchElectron([
   '.', `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`, FIXTURE,
 ], { cwd: ROOT, env: childEnv, windowsHide: false });
 child.stdout.on('data', (d) => process.stdout.write(String(d)));

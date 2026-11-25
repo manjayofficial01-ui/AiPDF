@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Live verification of the text-markup tools (Highlight, Underline, StrikeOut,
@@ -14,9 +15,9 @@ import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
-const PORT = 9548;
+const PORT = await freePort();
 /* A per-run user-data dir in the OS temp area. A fixed dir in the repo has to
  * be bulk-deleted on every run, and a recursive delete of a user-data tree
  * trips the environment's bulk-delete guard once it passes ~50 files — the
@@ -27,7 +28,7 @@ mkdirSync(path.dirname(UD), { recursive: true });
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
+const child = launchElectron(['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

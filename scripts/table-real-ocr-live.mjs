@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 /**
  * THE acceptance test for the reported bug, on the reported file:
  * "D:\Advertisement\ad\Ok\3\Sunmoon Media 4x12 Gorakha sadak yojana.pdf"
@@ -22,10 +23,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FILE = 'D:\\Advertisement\\ad\\Ok\\3\\Sunmoon Media 4x12 Gorakha sadak yojana.pdf';
 const OUT = path.join(ROOT, '.smoke');
-const PORT = 9427;
+const PORT = await freePort();
 fs.mkdirSync(OUT, { recursive: true });
 if (!fs.existsSync(FILE)) { console.log('OCR_TABLE_FAIL real file missing: ' + FILE); process.exit(1); }
 
@@ -36,7 +37,7 @@ delete childEnv.ELECTRON_RUN_AS_NODE;
 // Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
 // trip the safe-delete bulk guard; they also inherit another suite settings.
 const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-table-real-ocr-live-ud-"));
-const child = spawn(ELECTRON, ['.', FILE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env: childEnv });
+const child = launchElectron(['.', FILE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env: childEnv });
 child.stderr.on('data', () => {});
 // Watchdog: OCR has 4 minutes; nothing here should exceed 7 minutes total.
 setTimeout(() => { console.log('OCR_TABLE_FAIL global watchdog (7 min)'); try { child.kill(); } catch {} process.exit(2); }, 420000).unref?.();

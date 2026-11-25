@@ -1,7 +1,7 @@
 {
   "name": "aipdf-editor",
   "productName": "AiPDF Editor",
-  "version": "2.26.0",
+  "version": "2.27.0",
   "description": "AiPDF Editor — a modern Electron-based PDF viewer & editor with AI assistance, contract intelligence, smart redaction, multi-provider read-aloud and an agentic AI bot",
   "main": "src/main/main.js",
   "author": {
@@ -31,6 +31,7 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "test:fixture": "node scripts/ensure-fixture.mjs",
+    "test:harness": "node scripts/electron-harness-test.mjs",
     "test:ocr": "node scripts/ocr-test.mjs",
     "test:ocr-server": "node scripts/ocr-server-test.mjs",
     "test:ocr-packaged": "node scripts/ocr-diag.mjs",
@@ -103,7 +104,7 @@
     "test:editplan": "node scripts/editplan-test.mjs",
     "test:redact": "node scripts/redact-flow-test.mjs",
     "test:siguard": "node scripts/signature-guard-test.mjs",
-    "test:quick": "npm run test:fixture && npm run test:anna-adapter && npm run test:relay && npm run test:secure-settings && npm run test:visualdiff && npm run test:visual-context && npm run test:local-ai && npm run test:batch && npm run test:aidocs && npm run test:stirling && npm run test:trust",
+    "test:quick": "npm run test:fixture && npm run test:harness && npm run test:anna-adapter && npm run test:relay && npm run test:secure-settings && npm run test:visualdiff && npm run test:visual-context && npm run test:local-ai && npm run test:batch && npm run test:aidocs && npm run test:stirling && npm run test:trust",
     "test:app": "npm run test:editplan && npm run test:direct && npm run test:redact && npm run test:local-ai-ui && npm run test:batch-file && npm run test:trust-preview && npm run test:viewer-large && npm run test:web-workspace && npm run test:siguard",
     "test": "npm run test:quick && npm run test:app && npm run test:anna-e2e && npm run build:web"
   },

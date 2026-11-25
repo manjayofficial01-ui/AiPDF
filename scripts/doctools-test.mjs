@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 /**
  * Integration test for the Documents menu tools (Compare / Overlay / Scale /
  * Remove Blank Pages / Adjust Colors).
@@ -18,10 +19,10 @@ import { PDFDocument as PdfLibDoc, StandardFonts, rgb } from '@cantoo/pdf-lib';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'doctools.pdf');
 const OTHER = path.join(ROOT, '.fixtures', 'doctools-other.pdf');
-const PORT = 9481;
+const PORT = await freePort();
 // Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
 // trip the safe-delete bulk guard; they also inherit another suite settings.
 const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-doctools-test-ud-"));
@@ -95,7 +96,7 @@ await fixtureB();
 
 /* ── drive the app ─────────────────────────────────────────────────────── */
 
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
+const child = launchElectron(['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stdout.on('data', () => {});
 child.stderr.on('data', () => {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

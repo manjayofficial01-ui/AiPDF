@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 import './ensure-fixture.mjs';
 /**
  * Crop Pages live verification:
@@ -16,16 +17,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
-const PORT = 9477;
+const PORT = await freePort();
 // Per-run temp profile: fixed .smoke/ user-data dirs grow past 50 files and
 // trip the safe-delete bulk guard; they also inherit another suite settings.
 const UD = fs.mkdtempSync(path.join(os.tmpdir(), "aipdf-crop-preview-test-ud-"));
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env: childEnv });
+const child = launchElectron(['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env: childEnv });
 child.stderr.on('data', () => {});
 child.stdout.on('data', () => {});
 setTimeout(() => { console.log('TEST_TIMEOUT watchdog'); try { child.kill(); } catch { /* gone */ } process.exit(2); }, 180000).unref?.();

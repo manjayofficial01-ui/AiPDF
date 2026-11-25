@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 /**
  * Launch test — proves the app actually becomes *visible*, not just that its
  * renderer boots.
@@ -18,8 +19,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
-const PORT = 9411;
+const ELECTRON = electronPath();
+const PORT = await freePort();
 const results = { cdp: false, booted: null, raf: null, visibleWindows: 0, exitedEarly: null, checks: [] };
 
 function check(name, ok, detail) {
@@ -76,7 +77,7 @@ delete childEnv.ELECTRON_RUN_AS_NODE; // would make require('electron') return t
 // NOTE: do not pass windowsHide here. It sets STARTUPINFO wShowWindow=SW_HIDE,
 // which makes Windows create the child's GUI window hidden and the visibility
 // assertion below then measures the harness instead of the app.
-const child = spawn(ELECTRON, ['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env: childEnv });
+const child = launchElectron(['.', `--user-data-dir=${PROFILE}`, `--remote-debugging-port=${PORT}`], { cwd: ROOT, env: childEnv });
 let earlyExit = null;
 child.stdout.on('data', (d) => process.stdout.write(String(d)));
 child.stderr.on('data', (d) => process.stdout.write(String(d)));

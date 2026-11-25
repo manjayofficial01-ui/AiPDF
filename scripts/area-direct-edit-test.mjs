@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron } from './lib/electron-harness.mjs';
 /**
  * Area Direct Edit — acceptance test on ONE supplied PDF.
  *
@@ -34,7 +35,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PACKAGED = !!process.env.AIPDF_EXE;
 const EXE = PACKAGED
   ? path.resolve(process.env.AIPDF_EXE)
-  : path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+  : electronPath();
 const SRC = process.argv[2];
 if (!SRC || !fs.existsSync(SRC)) {
   console.log('FAIL missing pdf: node scripts/area-direct-edit-test.mjs <file.pdf>');
@@ -83,7 +84,7 @@ delete env.ELECTRON_RUN_AS_NODE;
 const launch = PACKAGED
   ? [COPY, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`]
   : ['.', COPY, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`];
-const child = spawn(EXE, launch, { cwd: ROOT, env });
+const child = launchElectron(launch, { cwd: ROOT, env, executable: EXE });
 child.stderr.on('data', () => {});
 child.stdout.on('data', () => {});
 setTimeout(() => { console.log('TIMEOUT'); try { child.kill(); } catch { /* gone */ } process.exit(2); }, 240000).unref?.();

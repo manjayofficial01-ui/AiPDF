@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron } from './lib/electron-harness.mjs';
 /**
  * Native-menu wiring check.
  *
@@ -17,7 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const PROBE = path.join(ROOT, '.smoke', 'menu-probe.cjs');
 
 fs.mkdirSync(path.dirname(PROBE), { recursive: true });
@@ -56,7 +57,7 @@ const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
 
 const out = await new Promise((resolve) => {
-  const child = spawn(ELECTRON, [PROBE], { cwd: ROOT, env });
+  const child = launchElectron([PROBE], { cwd: ROOT, env });
   let buf = '';
   child.stdout.on('data', (d) => { buf += d; });
   child.stderr.on('data', () => {});

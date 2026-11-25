@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { electronPath, launchElectron, freePort } from './lib/electron-harness.mjs';
 /**
  * Live verification that the Edit image tool is a marquee tool.
  *
@@ -23,9 +24,9 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON = electronPath();
 const FIXTURE = path.join(ROOT, '.smoke', 'image-marquee-fixture.pdf');
-const PORT = 9517;
+const PORT = await freePort();
 // A per-run temp user-data dir: a fixed dir under .smoke/ grows past the
 // bulk-delete guard and then refuses to start on the second run.
 const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-marquee-'));
@@ -44,7 +45,7 @@ const UD = fs.mkdtempSync(path.join(os.tmpdir(), 'aipdf-marquee-'));
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-const child = spawn(ELECTRON, ['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
+const child = launchElectron(['.', FIXTURE, `--remote-debugging-port=${PORT}`, `--user-data-dir=${UD}`], { cwd: ROOT, env });
 child.stderr.on('data', () => {}); child.stdout.on('data', () => {});
 setTimeout(() => { console.log('TIMEOUT'); try { child.kill(); } catch { /* gone */ } process.exit(2); }, 180000).unref?.();
 

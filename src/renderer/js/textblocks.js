@@ -16,6 +16,32 @@
  *  arrives as several names and every line becomes its own block. */
 const styleKey = (family, size) => `${String(family || 'Helvetica').toLowerCase()}@${(size || 10).toFixed(1)}`;
 
+/* pdf.js TextItem has no colour field. The exact-colour plan resolver reads the
+   page operator list and registers that evidence against the SAME text-content
+   object before grouping. Keeping it in a WeakMap avoids mutating pdf.js's
+   cached objects and lets the shared block model retain mixed-colour evidence. */
+const sourceRunColors = new WeakMap();
+const validRgb = (color) => Array.isArray(color) && color.length >= 3
+  && color.slice(0, 3).every((v) => Number.isFinite(v) && v >= 0 && v <= 1);
+function normalizedColors(value) {
+  const list = validRgb(value) ? [value] : value;
+  if (!Array.isArray(list)) return [];
+  return list.filter(validRgb).map((color) => color.slice(0, 3));
+}
+function uniqueColors(colors) {
+  const out = [];
+  for (const color of normalizedColors(colors)) {
+    if (!out.some((seen) => seen.every((v, i) => Math.abs(v - color[i]) < 1e-9))) out.push(color);
+  }
+  return out;
+}
+
+/** Register operator-list colour/font evidence by pdf.js item index. Missing
+ *  entries stay uncertain; they must not silently become black. */
+export function setTextSourceColors(tc, byIndex) {
+  if (tc && typeof tc === 'object') sourceRunColors.set(tc, new Map(byIndex || []));
+}
+
 /** A whitespace-only run far wider than a normal space is a POSITIONING
  *  artifact: producers bridge a table gutter with a stretched space or a TJ
  *  offset, and the run is then technically contiguous with the next cell. Left
@@ -259,11 +285,19 @@ export function textRuns(tc, only = null) {
       width = chars * size * 0.5;
     }
 
+    const registered = sourceRunColors.get(tc);
+    const source = registered?.get(index);
+    const explicit = normalizedColors(source?.colors ?? it.colors ?? it.color);
+    const colors = explicit.length ? explicit : (registered ? [] : [[0, 0, 0]]);
+    const sourceFonts = Array.isArray(source?.fonts)
+      ? [...new Set(source.fonts.map(String).filter(Boolean))] : [];
+
     runs.push({
       index, text: it.str, x: t[4], y: t[5], end: t[4] + width * u[0], endY: t[5] + width * u[1],
       width, size, angle, rot, u, n,
       font: it.fontName,
       family: tc.styles?.[it.fontName]?.fontFamily || 'Helvetica',
+      colors, colorCertain: explicit.length > 0 && source?.colorCertain !== false, sourceFonts,
       eol: !!it.hasEOL,
     });
   }
@@ -773,13 +807,19 @@ function finishBlock(g, pageWidth, kind, itemIndices, lineIds, pageIndex = 0) {
   const key = isOcr
     ? `o:${pageIndex}:${(lineIds || []).join('.')}`
     : `n:${indices.join('.')}`;
+  const nativeRuns = isOcr ? [] : g.lines.flatMap((line) => line.runs || []);
+  const colors = isOcr ? [[0, 0, 0]] : uniqueColors(nativeRuns.flatMap((run) => run.colors || []));
+  const colorCertain = !isOcr && nativeRuns.length > 0
+    && nativeRuns.every((run) => run.colorCertain && run.colors?.length);
+  const sourceFonts = [...new Set(nativeRuns.flatMap((run) => run.sourceFonts || []))];
+  const fontNames = [...new Set(nativeRuns.map((run) => run.font).filter(Boolean))];
 
   return {
     key, kind,
     itemIndices: indices,
     lineIds: isOcr ? (lineIds || []) : undefined,
     text, size: g.size, fontFamily: g.family,
-    baseline, color: [0, 0, 0],
+    baseline, color: colors[0] || [0, 0, 0], colors, colorCertain, sourceFonts, fontNames,
     coverRect, rect: coverRect.slice(),
     angle,
     maxWidth: Math.max(10, Math.min(Math.max(10, (pageWidth || 595) - left - 3), right - left + 3)),

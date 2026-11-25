@@ -12,7 +12,7 @@
  *   saveDialog            → File System Access API (Chromium), download fallback
  *   readFile              → registered File/handle, or the IndexedDB user store
  *   writeFile             → handle write / download / IndexedDB by path kind
- *   storeGet / storeSet   → localStorage (same JSON shape as main's settings file)
+ *   storeGet / storeSet   → in-memory settings; non-secret values persist in localStorage
  *   listSystemFonts       → empty index; users can still upload TTF/OTF, and
  *                           uploaded fonts persist in IndexedDB across reloads
  *   aiModels / aiChat /   → direct fetch first (most providers send CORS
@@ -50,9 +50,31 @@
   /* ── settings store (mirrors main's settings file semantics) ──────────── */
 
   const LS_KEY = 'aipdf.web.store';
+  const WORKSPACE_META_KEY = 'aipdf.web.workspace.v1';
+  const WORKSPACE_MAX_BYTES = 200 * 1024 * 1024;
+  let workspaceMeta = {};
+  try { workspaceMeta = JSON.parse(localStorage.getItem(WORKSPACE_META_KEY) || '{}') || {}; } catch { workspaceMeta = {}; }
+  const persistWorkspaceMeta = () => {
+    try { localStorage.setItem(WORKSPACE_META_KEY, JSON.stringify(workspaceMeta)); } catch { /* private mode */ }
+  };
+  const sanitizePersistedStore = (value) => {
+    const copy = JSON.parse(JSON.stringify(value || {}));
+    if (copy.settings?.ai) {
+      copy.settings.ai.apiKey = '';
+      if (Array.isArray(copy.settings.ai.customHeaders)) {
+        copy.settings.ai.customHeaders = copy.settings.ai.customHeaders.map((header) => ({ ...header, value: '' }));
+      }
+    }
+    if (copy.settings?.tts?.keys) copy.settings.tts.keys = {};
+    return copy;
+  };
   let store = {};
-  try { store = JSON.parse(localStorage.getItem(LS_KEY) || '{}') || {}; } catch { store = {}; }
-  const persistStore = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(store)); } catch { /* private mode */ } };
+  try {
+    const loaded = JSON.parse(localStorage.getItem(LS_KEY) || '{}') || {};
+    store = sanitizePersistedStore(loaded);
+    if (JSON.stringify(store) !== JSON.stringify(loaded)) localStorage.setItem(LS_KEY, JSON.stringify(store));
+  } catch { store = {}; }
+  const persistStore = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(sanitizePersistedStore(store))); } catch { /* private mode */ } };
 
   /* ── virtual file table ───────────────────────────────────────────────── */
   // Every path the renderer holds came from a gesture (file pick, save pick,
@@ -62,8 +84,39 @@
 
   /** vpath → { file?: File, handle?: FileSystemFileHandle, download?: name, bytes?: Uint8Array, mtimeMs } */
   const files = new Map();
+  for (const entry of Object.values(workspaceMeta)) {
+    if (entry?.path) files.set(entry.path, { idbKey: entry.path, download: entry.name, mtimeMs: entry.mtimeMs || Date.now() });
+  }
+  if (Array.isArray(store.recents)) store.recents = store.recents.filter((entry) => files.has(entry.path));
 
   const register = (path, entry) => { files.set(String(path), entry); return String(path); };
+  const workspacePath = (name) => `${USER_DATA}/documents/${encodeURIComponent(name)}`;
+
+  async function workspaceQuota() {
+    let quota = WORKSPACE_MAX_BYTES;
+    try {
+      const estimate = await navigator.storage?.estimate?.();
+      if (estimate?.quota) quota = Math.min(quota, Math.floor(estimate.quota * 0.9));
+    } catch { /* use the conservative built-in cap */ }
+    return quota;
+  }
+
+  async function persistWorkspaceEntry(path, entry) {
+    const bytes = await entryBytes(entry);
+    if (!bytes?.length) throw new Error('The document is empty.');
+    const quota = await workspaceQuota();
+    const previousSize = Number(workspaceMeta[path]?.size) || 0;
+    const used = Object.values(workspaceMeta).reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+    if (bytes.length > quota || used - previousSize + bytes.length > quota) {
+      throw new Error('Browser storage quota exceeded. Remove an older working copy and try again.');
+    }
+    await idbPut(path, bytes);
+    const name = entry.name || entry.download || baseName(path);
+    workspaceMeta[path] = { path, name, size: bytes.length, mtimeMs: entry.mtimeMs || Date.now() };
+    persistWorkspaceMeta();
+    files.set(path, { idbKey: path, download: name, mtimeMs: workspaceMeta[path].mtimeMs });
+    return path;
+  }
 
   async function entryBytes(entry) {
     if (entry.handle) return new Uint8Array(await (await entry.handle.getFile()).arrayBuffer());
@@ -93,8 +146,12 @@
     const db = await idb();
     return new Promise((resolve, reject) => {
       const tx = db.transaction('files', mode);
-      const out = fn(tx.objectStore('files'));
-      tx.oncomplete = () => resolve(out.result !== undefined ? out.result : out);
+      let result;
+      try {
+        const request = fn(tx.objectStore('files'));
+        request.onsuccess = () => { result = request.result; };
+      } catch (e) { reject(e); return; }
+      tx.oncomplete = () => resolve(result);
       tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
       tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
     });
@@ -128,10 +185,22 @@
       if (exts.length) input.accept = exts.join(',');
       input.style.display = 'none';
       let picked = false;
-      input.addEventListener('change', () => {
+      input.addEventListener('change', async () => {
         picked = true;
         const list = Array.from(input.files || []);
-        const paths = list.map((f) => register(`/web/${f.name}`, { file: f, mtimeMs: f.lastModified || Date.now() }));
+        let paths = list.map((f) => register(`/web/${f.name}`, { file: f, name: f.name, mtimeMs: f.lastModified || Date.now() }));
+        if (store.settings?.webWorkspace) {
+          try {
+            paths = [];
+            for (const f of list) {
+              const path = workspacePath(f.name);
+              register(path, { file: f, name: f.name, mtimeMs: f.lastModified || Date.now() });
+              paths.push(await persistWorkspaceEntry(path, files.get(path)));
+            }
+          } catch (err) {
+            window.alert(msg(err));
+          }
+        }
         input.remove();
         resolve(paths.length ? paths : null);
       });
@@ -181,10 +250,10 @@
 
   /**
    * Providers with CORS headers (OpenAI, Gemini, ElevenLabs, Mistral…) are
-   * called straight from the browser. Others (Claude-style gateways, custom
-   * basUrls without CORS) throw a network TypeError; the identical request
-   * then repeats through the same-origin relay, which honours custom headers
-   * exactly like the desktop's main-process proxy.
+   * called straight from the browser. Others throw a network TypeError; the
+   * identical request then repeats through the same-origin relay after a
+   * short-lived provider-bound token is issued. Custom hosts must be explicitly
+   * allowlisted in the relay environment or use the desktop edition.
    */
   async function providerFetch(opts) {
     const direct = {
@@ -195,10 +264,22 @@
     try {
       return await fetch(opts.url, direct);
     } catch (err) {
+      const tokenRes = await fetch('/api/relay-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: opts.url }),
+      });
+      if (!tokenRes.ok) {
+        if (tokenRes.status === 404 || tokenRes.status === 405 || tokenRes.status === 501) throw err;
+        const denied = await tokenRes.json().catch(() => null);
+        throw new Error(denied?.error || 'The web relay is unavailable for this provider.');
+      }
+      const issued = await tokenRes.json();
+      if (!issued?.token) throw new Error('The web relay did not issue a valid token.');
       const res = await fetch(RELAY, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: opts.url, method: direct.method, headers: opts.headers || {}, body: opts.body != null ? opts.body : undefined }),
+        body: JSON.stringify({ url: opts.url, method: direct.method, headers: opts.headers || {}, body: opts.body != null ? opts.body : undefined, relayToken: issued.token }),
       });
       if (!res.ok && (res.status === 404 || res.status === 405 || res.status === 501)) {
         // No relay in this deployment: surface the original browser error.
@@ -300,7 +381,7 @@
   function annaErrorText(err) {
     const code = err && err.code ? String(err.code) : '';
     const raw = String((err && (err.message || err)) || err || 'AI request failed').slice(0, 300);
-    if (code === 'quota_exceeded') return 'Anna quota exceeded — top up your Anna credits or pick another AI provider in Settings.';
+    if (code === 'APP_QUOTA_EXCEEDED' || code === 'quota_exceeded') return 'Anna quota exceeded — top up your Anna credits or pick another AI provider in Settings.';
     if (code === 'not_implemented') return 'The Anna host model is not available in this environment.';
     if (code === 'permission_denied') return 'Anna denied this call — reinstall the AiPDF Editor app from the Anna App Store.';
     return raw;
@@ -313,13 +394,16 @@
       const messages = (Array.isArray(body.messages) ? body.messages : [])
         .map(annaMapMessage).filter(Boolean);
       if (!messages.length) return { ok: false, error: 'Empty AI request.' };
+      const request = { messages };
+      if (typeof body.temperature === 'number' && Number.isFinite(body.temperature)) request.temperature = body.temperature;
+      if (typeof body.max_tokens === 'number' && Number.isFinite(body.max_tokens)) request.maxTokens = body.max_tokens;
       let reply;
       try {
-        reply = await rt.llm.complete({ messages });
+        reply = await rt.llm.complete(request);
       } catch (err) {
         // Older hosts reject the system role — fold it into the first user turn.
         if (/role|system/i.test(String((err && (err.message || err)) || err))) {
-          reply = await rt.llm.complete({ messages: annaMergeSystem(messages) });
+          reply = await rt.llm.complete({ ...request, messages: annaMergeSystem(messages) });
         } else {
           throw err;
         }
@@ -328,7 +412,16 @@
       // Streaming callers get the finished answer as one delta; the dock's
       // loading state resolves exactly as it does for non-streaming providers.
       if (opts.stream && streamHandler && text) streamHandler({ reqId: opts.reqId, delta: text, text });
-      return { ok: true, text };
+      const result = { ok: true, text };
+      if (opts.raw) {
+        result.json = {
+          choices: [{
+            message: { content: text },
+            finish_reason: reply && reply.stopReason === 'maxTokens' ? 'length' : 'stop',
+          }],
+        };
+      }
+      return result;
     } catch (err) {
       return { ok: false, error: annaErrorText(err) };
     }
@@ -372,10 +465,15 @@
      */
     pathForFile(file) {
       if (!file || !file.name) return '';
-      return register(`/web/${file.name}`, { file, download: file.name, mtimeMs: file.lastModified || Date.now() });
+      const path = store.settings?.webWorkspace ? workspacePath(file.name) : `/web/${file.name}`;
+      return register(path, { file, name: file.name, download: file.name, mtimeMs: file.lastModified || Date.now() });
     },
 
-    async grantDroppedFile() { return true; },
+    async grantDroppedFile(path) {
+      if (!store.settings?.webWorkspace || !path) return true;
+      try { await persistWorkspaceEntry(path, files.get(path)); return true; }
+      catch (err) { window.alert(msg(err)); return false; }
+    },
     async fileExists(path) {
       if (files.has(path)) return true;
       if (under(path, USER_DATA)) {
@@ -386,8 +484,8 @@
     async fileStat(path) {
       const e = files.get(path);
       if (e) {
-        const size = e.file ? e.file.size : e.bytes ? e.bytes.length : null;
-        return { size: size || 0, mtimeMs: e.mtimeMs || Date.now() };
+        const size = e.file ? e.file.size : e.bytes ? e.bytes.length : workspaceMeta[path]?.size || null;
+        return { size: size || 0, mtimeMs: e.mtimeMs || workspaceMeta[path]?.mtimeMs || Date.now() };
       }
       return null;
     },
@@ -422,6 +520,16 @@
       try {
         const bytes = data instanceof Uint8Array ? data : utf8.encode(String(data));
         const e = files.get(path);
+        if (under(path, USER_DATA)) {
+          await idbPut(path, bytes);
+          if (workspaceMeta[path]) {
+            workspaceMeta[path].size = bytes.length;
+            workspaceMeta[path].mtimeMs = Date.now();
+            persistWorkspaceMeta();
+          }
+          files.set(path, { idbKey: path, download: workspaceMeta[path]?.name || e?.download || baseName(path), mtimeMs: Date.now() });
+          return { ok: true, path, size: bytes.length };
+        }
         if (e && e.handle) {
           const w = await e.handle.createWritable();
           await w.write(bytes);
@@ -431,10 +539,6 @@
         }
         if (e && e.download) {
           triggerDownload(bytes, e.download);
-          return { ok: true, path, size: bytes.length };
-        }
-        if (under(path, USER_DATA)) {
-          await idbPut(path, bytes);
           return { ok: true, path, size: bytes.length };
         }
         // Internal/unknown target (parity-test fixtures, in-memory writes).
@@ -479,6 +583,30 @@
 
     async storeGet(key, fallback) { return key in store ? store[key] : fallback; },
     async storeSet(key, value) { store[key] = value; persistStore(); return true; },
+
+    async workspaceList() {
+      return Object.values(workspaceMeta)
+        .filter((entry) => entry?.path)
+        .sort((a, b) => (b.mtimeMs || 0) - (a.mtimeMs || 0));
+    },
+    async workspaceUsage() {
+      const usage = Object.values(workspaceMeta).reduce((sum, entry) => sum + (Number(entry.size) || 0), 0);
+      return { usage, quota: await workspaceQuota() };
+    },
+    async workspaceDelete(path) {
+      if (!workspaceMeta[path]) return false;
+      try {
+        await idbDel(path);
+        delete workspaceMeta[path];
+        files.delete(path);
+        if (Array.isArray(store.recents)) store.recents = store.recents.filter((entry) => entry.path !== path);
+        persistWorkspaceMeta();
+        persistStore();
+        return true;
+      } catch {
+        return false;
+      }
+    },
 
     /* ── AI (models / chat / stream) ─────────────────────────────────────── */
 

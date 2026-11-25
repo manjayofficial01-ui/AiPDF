@@ -6,6 +6,7 @@
  *   node scripts/stirling-test.mjs
  */
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import {
   COMPRESS_PRESETS, compressPresetById, planCompress, estimateCompress,
   flattenPlan, sanitizePlan, applySanitizeModel, docInfoSummary, fmtBytesStirling,
@@ -153,6 +154,49 @@ t('pageNumberPlan supports roman numerals', () => {
   assert.equal(p.pages[0].text, 'i');
   assert.ok(PAGE_NUMBER_FORMATS.length >= 4);
 });
+t('pageNumberPlan accepts the standard Roman ceiling, including a range ending at 3999', () => {
+  assert.deepEqual(pageNumberPlan({ formatId: 'roman', pageCount: 1, start: 3999 }).pages, [
+    { page: 0, text: 'mmmcmxcix' },
+  ]);
+  assert.deepEqual(pageNumberPlan({ formatId: 'ROMAN', from: 1, to: 2, pageCount: 2, start: 3998 }).pages, [
+    { page: 0, text: 'MMMCMXCVIII' },
+    { page: 1, text: 'MMMCMXCIX' },
+  ]);
+});
+t('pageNumberPlan rejects a Roman start above 3999', () => {
+  assert.throws(() => pageNumberPlan({ formatId: 'roman', pageCount: 1, start: 4000 }), /3999/);
+});
+t('pageNumberPlan rejects a Roman range whose final label exceeds 3999', () => {
+  assert.throws(() => pageNumberPlan({ formatId: 'ROMAN', from: 1, to: 2, pageCount: 2, start: 3999 }), /3999/);
+});
+t('pageNumberPlan bounds the Number.MAX_SAFE_INTEGER Roman regression probe', () => {
+  const moduleUrl = new URL('../src/renderer/js/stirling.js', import.meta.url).href;
+  const probe = `
+    import { pageNumberPlan } from ${JSON.stringify(moduleUrl)};
+    try {
+      pageNumberPlan({ formatId: 'roman', from: 1, to: 1, pageCount: 1, start: Number.MAX_SAFE_INTEGER });
+      console.log('UNGUARDED');
+    } catch (error) {
+      console.log('REJECTED:' + error.message);
+    }
+  `;
+  const output = execFileSync(process.execPath, ['--input-type=module', '--eval', probe], {
+    encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.match(output, /^REJECTED:.*3999/m);
+});
+t('pageNumberPlan keeps starts above the Roman cap for non-Roman formats', () => {
+  assert.equal(pageNumberPlan({ formatId: 'n', pageCount: 1, start: 4000 }).pages[0].text, '4000');
+  assert.equal(pageNumberPlan({ formatId: 'n-of-N', pageCount: 1, start: 4000 }).pages[0].text, 'Page 4000 of 1');
+  assert.equal(pageNumberPlan({ formatId: 'n/N', pageCount: 1, start: 4000 }).pages[0].text, '4000 / 1');
+});
+t('pageNumberPlan applies a 1-based range and printed start number', () => {
+  const p = pageNumberPlan({ formatId: 'n-of-N', from: 2, to: 3, start: 5, pageCount: 3 });
+  assert.deepEqual(p.pages, [
+    { page: 1, text: 'Page 5 of 3' },
+    { page: 2, text: 'Page 6 of 3' },
+  ]);
+});
 t('autoRotatePlan snaps confident angles', () => {
   const r = autoRotatePlan([{ angle: 92, confidence: 0.95 }, { angle: 10, confidence: 0.2 }]);
   assert.equal(r[0].delta, 270);
@@ -220,6 +264,22 @@ t('pipelineStamps honours the format and header placement', () => {
   const stamps = pipelineStamps({ pageNumbers: { formatId: 'ROMAN', scope: 'header', align: 'right', fontSize: 14 } }, 2);
   assert.deepEqual(stamps.map((s) => s.text), ['I', 'II']);
   assert.ok(stamps.every((s) => s.kind === 'header' && s.align === 'right' && s.fontSize === 14));
+});
+t('pipelineStamps forwards range, start, alignment, and RGB color', () => {
+  const stamps = pipelineStamps({ pageNumbers: {
+    formatId: 'n-of-N', from: 2, to: 3, start: 5,
+    scope: 'header', align: 'left', fontSize: 12, color: [0.2, 0.4, 0.6],
+  } }, 3);
+  assert.deepEqual(stamps.map((s) => s.text), ['Page 5 of 3', 'Page 6 of 3']);
+  assert.deepEqual(stamps.map((s) => [s.from, s.to]), [[2, 2], [3, 3]]);
+  assert.ok(stamps.every((s) => s.kind === 'header' && s.align === 'left' && s.fontSize === 12));
+  assert.deepEqual(stamps[0].color, [0.2, 0.4, 0.6]);
+});
+t('pipelineStamps accepts proposal hex colors and preserves the default for invalid colors', () => {
+  const stamps = pipelineStamps({ pageNumbers: { color: '#336699' } }, 1);
+  assert.deepEqual(stamps[0].color, [0.2, 0.4, 0.6]);
+  assert.deepEqual(pipelineStamps({ pageNumbers: { color: '#GGGGGG' } }, 1)[0].color, [0.4, 0.4, 0.4]);
+  assert.deepEqual(pipelineStamps({ pageNumbers: {} }, 1)[0].color, [0.4, 0.4, 0.4]);
 });
 t('pipelineStamps builds a real diagonal watermark', () => {
   const stamps = pipelineStamps({ watermark: { text: 'INTERNAL' } }, 4);

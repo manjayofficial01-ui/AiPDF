@@ -8,6 +8,10 @@ export function on(evt, fn) {
   return () => listeners.get(evt).delete(fn);
 }
 export function emit(evt, payload) {
+  // Every dirty notification follows a document-model mutation (or a save that
+  // replaced the document bytes). Advance the revision before listeners run so
+  // an approval card cannot race the mutation it is meant to invalidate.
+  if (evt === 'dirty' && payload && typeof payload === 'object') touchDoc(payload);
   const s = listeners.get(evt);
   if (s) {
     const arr = Array.from(s);
@@ -113,6 +117,7 @@ export const DEFAULT_SETTINGS = {
     temperature: 0.2,
     maxPagesPerRequest: 40,
     smartContext: true,          // rank pages by relevance to the question
+    aiVisualContext: true,
     contextBudget: 26000,        // max context characters sent to the model
     defaultScope: 'page',        // page | doc | alldocs
     availableModels: [],         // cached list from GET /models
@@ -127,6 +132,7 @@ export const DEFAULT_SETTINGS = {
   // Previous Version. One copy of the document you are editing, replaced each
   // save — switch off if you do not want the extra file.
   backupBeforeSave: true,
+  webWorkspace: false,
   // Document text is sent to the configured AI endpoint only with consent.
   // `ask` prompts the first time a run needs to leave the machine, `allow`
   // remembers the approval, `deny` keeps the app offline-local.
@@ -246,6 +252,36 @@ export function getDoc(id) {
   return state.docs.find((d) => d.id === id) || null;
 }
 
+/* A plan stages mutations in the live model while candidate bytes are built and
+   read. Keep that interval exclusive: UI input and document lifecycle actions
+   check this lock, while revision checks still catch programmatic bypasses. */
+const documentTransactions = new WeakMap();
+export function beginDocTransaction(doc) {
+  if (!doc || activeDoc() !== doc) throw new Error('The document is no longer active.');
+  if (documentTransactions.has(doc)) throw new Error('A document transaction is already in progress.');
+  const token = {};
+  documentTransactions.set(doc, token);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (documentTransactions.get(doc) === token) documentTransactions.delete(doc);
+  };
+}
+export function hasDocumentTransaction() {
+  return state.docs.some((doc) => documentTransactions.has(doc));
+}
+/** Opaque capability passed only by the AI staging transaction to its writers. */
+export function docTransactionToken(doc) {
+  return documentTransactions.get(doc) || null;
+}
+/** Shared mutation boundary: manual writers are rejected while a plan owns the
+ *  document, and a transaction token is valid only for the lock that issued it. */
+export function canCommitDocMutation(doc, transactionToken = null) {
+  const current = documentTransactions.get(doc);
+  return current ? current === transactionToken : transactionToken == null;
+}
+
 export function newDocShell(partial = {}) {
   return {
     id: uid('d'),
@@ -272,6 +308,7 @@ export function newDocShell(partial = {}) {
     saveSecurityChoice: null,  // 'keep' | 'strip', asked once per protected doc
     hasSignature: false,
     dirty: false,
+    revision: 0,
     history: [],
     hIndex: -1,
     // Structural undo. Page add/delete/extract/reorder rebuild the whole file,
@@ -290,8 +327,7 @@ const MAX_STRUCT_UNDO = 12;
 
 /** Record the file bytes as they are *before* a structural change, and drop any
  *  redo tail — a fresh edit invalidates the future, exactly like pushHistory. */
-export function pushStructUndo(bytes) {
-  const doc = activeDoc();
+export function pushStructUndo(bytes, doc = activeDoc()) {
   if (!doc) return;
   doc.structUndoStack = (doc.structUndoStack || []).concat([bytes]).slice(-MAX_STRUCT_UNDO);
   doc.structRedoStack = [];
@@ -306,22 +342,72 @@ export function canRedoStructure() {
 }
 export function markDocClean() { setClean(activeDoc()); }
 
-/* ── History ────────────────────────────────────────────────────────────── */
+/* ── History and transactional model snapshots ─────────────────────────── */
 
-function snapshot(doc) {
-  return JSON.stringify({
-    annots: doc.annots,
-    textEdits: doc.textEdits,
-    stamps: doc.stamps,
-    pageOps: doc.pageOps,
-    pageRotate: doc.pageRotate,
-    crops: doc.crops || {},
-    newFields: doc.newFields,
-  });
+const MODEL_FIELDS = [
+  'numPages', 'pageSizes', 'pageOps', 'pageRotate', 'crops',
+  'meta', 'attachments', 'newFields', 'annots', 'textEdits', 'stamps',
+];
+
+function modelState(doc) {
+  const model = {};
+  for (const field of MODEL_FIELDS) model[field] = doc[field];
+  return model;
 }
 
-export function pushHistory(label) {
-  const doc = activeDoc();
+/** Monotonic identity guard for plans bound to a document. Staged operations
+ *  call this explicitly because their normal dirty/history commit is deferred. */
+export function touchDoc(doc = activeDoc()) {
+  if (!doc) return 0;
+  doc.revision = (Number.isSafeInteger(doc.revision) ? doc.revision : 0) + 1;
+  return doc.revision;
+}
+
+/** Capture everything a nonstructural edit plan can mutate, plus the exact
+ *  dirty/history state that must be restored if staging or verification fails. */
+export function captureModel(doc) {
+  return {
+    model: structuredClone(modelState(doc)),
+    dirty: !!doc.dirty,
+    history: (doc.history || []).slice(),
+    hIndex: doc.hIndex,
+  };
+}
+
+/** Restore a transaction snapshot without emitting or committing history.
+ *  Revision deliberately remains monotonic; the caller advances it for the
+ *  rollback so other in-flight plans are invalidated too. */
+export function restoreModel(doc, snapshot) {
+  if (!doc || !snapshot || !snapshot.model) throw new Error('A document model snapshot is required.');
+  const model = structuredClone(snapshot.model);
+  for (const field of MODEL_FIELDS) doc[field] = model[field];
+  doc.dirty = !!snapshot.dirty;
+  doc.history = (snapshot.history || []).slice();
+  doc.hIndex = snapshot.hIndex;
+  state.selection = [];
+}
+
+/* JSON history must retain binary attachment payloads. A bare Uint8Array
+   stringifies as an object with numeric keys, which is neither a typed array nor
+   acceptable to the PDF writer after undo/redo. */
+const UINT8_ARRAY_TAG = '__aipdf_uint8_array__';
+function historyReplacer(_key, value) {
+  if (value instanceof Uint8Array) return { [UINT8_ARRAY_TAG]: Array.from(value) };
+  return value;
+}
+function historyReviver(_key, value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)
+    && Object.hasOwn(value, UINT8_ARRAY_TAG) && Array.isArray(value[UINT8_ARRAY_TAG])) {
+    return new Uint8Array(value[UINT8_ARRAY_TAG]);
+  }
+  return value;
+}
+
+function snapshot(doc) {
+  return JSON.stringify(modelState(doc), historyReplacer);
+}
+
+export function pushHistory(label, doc = activeDoc()) {
   if (!doc) return;
   const snap = snapshot(doc);
   if (doc.history[doc.hIndex] === snap) return;
@@ -329,7 +415,7 @@ export function pushHistory(label) {
   doc.history.push(snap);
   if (doc.history.length > 120) doc.history.shift();
   doc.hIndex = doc.history.length - 1;
-  markDirty(label);
+  markDirty(label, doc);
 }
 
 export function canUndo() { const d = activeDoc(); return !!d && d.hIndex > 0; }
@@ -352,19 +438,13 @@ export function redo() {
   return true;
 }
 function restore(doc, snap) {
-  const s = JSON.parse(snap);
-  doc.annots = s.annots;
-  doc.textEdits = s.textEdits;
-  doc.stamps = s.stamps;
-  doc.pageOps = s.pageOps;
-  doc.pageRotate = s.pageRotate;
+  const s = JSON.parse(snap, historyReviver);
+  for (const field of MODEL_FIELDS) doc[field] = s[field];
   doc.crops = s.crops || {};
-  doc.newFields = s.newFields;
   state.selection = [];
 }
 
-export function markDirty(label) {
-  const doc = activeDoc();
+export function markDirty(label, doc = activeDoc()) {
   if (!doc) return;
   doc.dirty = true;
   emit('dirty', doc);

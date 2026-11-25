@@ -17,7 +17,7 @@
 import * as PL from '/v/pdf-lib.js';
 import { settings, saveSettings } from './store.js';
 
-const { PDFDocument, PDFName, PDFDict, PDFArray } = PL;
+const { PDFDocument, PDFName, PDFDict, PDFArray, decodePDFRawStream } = PL;
 
 /* ── fontkit loader ─────────────────────────────────────────────────────── */
 
@@ -256,7 +256,9 @@ function extractFontProgram(doc, fontDict) {
       if (!ref) continue;
       const stream = doc.context.lookup(ref);
       if (stream && typeof stream.getContents === 'function') {
-        const bytes = stream.getContents();
+        // FontFile streams are commonly Flate-compressed. getContents() returns
+        // the encoded bytes; fontkit needs the decoded sfnt program.
+        const bytes = decodePDFRawStream(stream).decode();
         if (bytes && bytes.length > 64) return { key, bytes };
       }
     }

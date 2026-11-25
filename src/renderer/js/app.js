@@ -2,7 +2,7 @@ import {
   state, settings, loadSettings, saveSettings, saveRecents, activeDoc, getDoc, on, emit,
   newDocShell, pushHistory, undo, redo, canUndo, canRedo, addRecent, updateAnnot,
   removeAnnots, annotById, markDirty, setClean, addAnnot, reorderAnnots,
-  canUndoStructure, canRedoStructure,
+  canUndoStructure, canRedoStructure, hasDocumentTransaction,
   DEFAULT_SETTINGS, applySettingsToState,
 } from './store.js';
 import * as V from './viewer.js';
@@ -26,9 +26,11 @@ import { runContractReview } from './contract.js';
 import { toggleReadAloud as ttsToggle, stopReadAloud as ttsStop, openTtsSettings } from './tts.js';
 import { runAgent, agentSelfTest } from './agent.js';
 import { runVerifiedEdit, planSelfTest } from './editplan.js';
+import { openBatchWorkbench } from './batch.js';
 import { detectScannedPages, OCR_LANGS } from './ocr.js';
 import { captureRedactionSecrets, verifyRedactions, redactionVerdict } from './redaction.js';
 import { buildComparison, comparisonReport, jumpToPage } from './compare.js';
+import { buildVisualComparison, showTrustPreview } from './visualdiff.js';
 import { scalePages, removeBlankPages, rasterizePages, COLOR_PRESETS, colorPresetById, parsePageRange, allPages } from './docxtools.js';
 import {
   COMPRESS_PRESETS, compressPresetById, planCompress, estimateCompress,
@@ -791,14 +793,14 @@ async function boot() {
       await openDocFromPath('.fixtures/fixture.pdf');
       const d0 = activeDoc();
       if (!d0) return { ok: false, detail: 'no active doc' };
-      const blocks = await editableBlocks(0);
+      const blocks = await editableBlocks(0, d0);
       if (!blocks || !blocks.length) return { ok: false, detail: 'no text blocks on page 1' };
       const block = blocks.find((b) => b.text.trim().length > 12) || blocks[0];
       // Compare on the first line only: a multi-line block is joined with \n,
       // which will not appear in the extracted text of the rewritten file.
       const needle = block.text.split('\n')[0].trim().slice(0, 24);
       const marker = 'REFLOWPROOF';
-      const committed = await commitBlockEdit(0, block, marker, {});
+      const committed = await commitBlockEdit(0, block, marker, { doc: d0 });
       if (!committed) return { ok: false, detail: 'commitBlockEdit refused the edit' };
       const bytes = await buildPdf(activeDoc());
       if (!bytes || !bytes.length) return { ok: false, detail: 'buildPdf produced no bytes' };
@@ -826,9 +828,9 @@ async function boot() {
       await openDocFromPath('.fixtures/fixture.pdf');
       const d0 = activeDoc();
       if (!d0) return { ok: false, detail: 'no active doc' };
-      const blocks = await editableBlocks(0);
+      const blocks = await editableBlocks(0, d0);
       const block = blocks.find((b) => b.text.trim().length > 12) || blocks[0];
-      await commitBlockEdit(0, block, 'MODEPROOF', {});
+      await commitBlockEdit(0, block, 'MODEPROOF', { doc: d0 });
       const edit = activeDoc().textEdits[0];
       await buildPdf(activeDoc());
       const mode = edit.removal;
@@ -845,13 +847,15 @@ async function boot() {
       // row that proves the replacement is real, re-editable page text — it
       // must read the saved bytes, not the in-memory model.
       await openDocFromPath('.smoke/parity-reflow.pdf');
-      const blocks = await editableBlocks(0);
+      const doc = activeDoc();
+      if (!doc) return { ok: false, detail: 'no active document' };
+      const blocks = await editableBlocks(0, doc);
       const hit = blocks.find((b) => b.text.includes('REFLOWPROOF'));
       if (!hit) return { ok: false, detail: `no block contains the replacement: ${JSON.stringify(blocks.map((b) => b.text.slice(0, 20)))}` };
       // Roomier than the block the writer measured, so the assertion is about
       // round-tripping the replacement rather than about wrapping.
-      await commitBlockEdit(0, hit, 'REFLOWPROOF2', { maxWidth: 320, maxHeight: 120 });
-      const bytes = await buildPdf(activeDoc());
+      await commitBlockEdit(0, hit, 'REFLOWPROOF2', { doc, maxWidth: 320, maxHeight: 120 });
+      const bytes = await buildPdf(doc);
       const wres = await window.api.writeFile('.smoke/parity-reflow2.pdf', bytes);
       if (!wres || !wres.ok) return { ok: false, detail: 'write failed' };
       await openDocFromPath('.smoke/parity-reflow2.pdf');
@@ -938,11 +942,11 @@ async function boot() {
       await openDocFromPath('.fixtures/fixture.pdf');
       const d0 = activeDoc();
       if (!d0) return { ok: false, detail: 'no active doc' };
-      const blocks = await editableBlocks(0);
+      const blocks = await editableBlocks(0, d0);
       const block = blocks.find((b) => b.text.trim().length > 12) || blocks[0];
       if (!block) return { ok: false, detail: 'no text block to replace' };
       const committed = await commitBlockEdit(0, block, DEVANAGARI, {
-        fontFamily: f.name, maxWidth: 320, maxHeight: 60,
+        doc: d0, fontFamily: f.name, maxWidth: 320, maxHeight: 60,
       });
       if (!committed) return { ok: false, detail: 'commitBlockEdit refused' };
       drainFontSubstitutions();          // clear anything earlier guards left
@@ -1490,6 +1494,7 @@ function ribbonGroupsForMode() {
     // Attachments, Information and the Automate pipeline.
     case 'Documents': return [
       { title: 'Compare & combine', items: [
+        { icon: 'wand', label: 'Batch Workbench…', act: () => onMenuAction('docs:batch') },
         { icon: 'compare', label: 'Compare…', act: () => onMenuAction('docs:compare') },
         { icon: 'layers', label: 'Overlay…', act: () => onMenuAction('docs:overlay') },
       ] },
@@ -1956,6 +1961,7 @@ function updateTitle() {
 }
 
 async function activateDoc(id) {
+  if (hasDocumentTransaction()) return;
   const d = getDoc(id);
   if (!d || !d.pdf) return;
   state.activeId = id;
@@ -1975,6 +1981,7 @@ async function activateDoc(id) {
 }
 
 async function closeDoc(id) {
+  if (hasDocumentTransaction()) return;
   const d = getDoc(id);
   if (!d) return;
   if (d.dirty) {
@@ -1982,6 +1989,7 @@ async function closeDoc(id) {
     if (r === undefined) return;
     if (r) { const ok = await saveDoc(d); if (!ok) return; }
   }
+  if (hasDocumentTransaction()) return;
   state.docs = state.docs.filter((x) => x.id !== id);
   if (state.activeId === id) {
     const next = state.docs[state.docs.length - 1];
@@ -1996,12 +2004,14 @@ async function closeDoc(id) {
 /* ══ Opening documents ══════════════════════════════════════════════════ */
 
 export async function openDocFromPath(path, password = null) {
+  if (hasDocumentTransaction()) return null;
   const res = await window.api.readFile(path);
   if (!res.ok) return toast('Could not open: ' + res.error, 'err');
   await openDocFromBytes(res.data, path.split(/[\\/]/).pop(), path, password);
 }
 
 export async function openDocFromBytes(bytes, name, path = null, password = null) {
+  if (hasDocumentTransaction()) return null;
   try {
     stopReadAloudIfAny();
     const pdf = await loadPdfBytes(bytes, password ? { password } : {});
@@ -2018,6 +2028,10 @@ export async function openDocFromBytes(bytes, name, path = null, password = null
     // for every file opened to discover that almost none have one is not worth
     // it. Files that do get the precise count.
     doc.signatureCount = looksSigned(bytes) ? await countSignatures(bytes) : 0;
+    if (hasDocumentTransaction()) {
+      try { pdf.destroy(); } catch { /* ignore */ }
+      return null;
+    }
     state.docs.push(doc);
     setDocError('');
     state.activeId = doc.id;
@@ -2279,11 +2293,11 @@ function looksSigned(bytes) {
   }
 }
 
-/** The three app-owned helpers the edit-plan pipeline needs: build a candidate
- *  file, read it back with an independent extractor, and commit it. Passed in
- *  rather than imported, because editplan.js must not import the app shell. */
+/** The app-owned helpers the edit-plan pipeline needs: build and independently
+ *  read a candidate, then offer explicit Save changes / Save As actions. Passed
+ *  in rather than imported, because editplan.js must not import the app shell. */
 function planDeps() {
-  return { app: { buildDocBytes, extractTextFromBytes, saveDoc } };
+  return { app: { buildDocBytes, extractTextFromBytes, saveDoc, saveDocAs, countInkPixels } };
 }
 
 export async function saveDoc(doc = activeDoc()) {
@@ -2470,6 +2484,49 @@ export async function extractTextFromBytes(bytes) {
   }
   try { pdf.destroy(); } catch { /* ignore */ }
   return out;
+}
+
+/**
+ * Render one page of a candidate file and count the pixels inside a PDF-space
+ * rectangle (origin bottom-left) that are drawn in `rgb` (0–1 floats).
+ *
+ * This is the only post-check a colour change has: text extraction cannot see
+ * paint, so the verified plan renders the bytes that would be saved and looks
+ * at them. Anti-aliased glyph edges are blends toward the page colour, so the
+ * tolerance is per-channel and the caller decides how many pixels count.
+ */
+export async function countInkPixels(bytes, pageIndex, rect, rgb, { tolerance = 56, scale = 3 } = {}) {
+  if (typeof document === 'undefined' || !Array.isArray(rect) || !Array.isArray(rgb)) return 0;
+  const pdfjsLib = await import('/v/pdf.min.mjs');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/v/pdf.worker.min.mjs';
+  const pdf = await pdfjsLib.getDocument({ data: bytes.slice(0), useSystemFonts: false }).promise;
+  try {
+    const page = await pdf.getPage(pageIndex + 1);
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const x0 = Math.min(rect[0], rect[2]), x1 = Math.max(rect[0], rect[2]);
+    const y0 = Math.min(rect[1], rect[3]), y1 = Math.max(rect[1], rect[3]);
+    const sx = Math.max(0, Math.floor(x0 * scale));
+    const sy = Math.max(0, Math.floor((viewport.height / scale - y1) * scale));
+    const sw = Math.max(1, Math.min(Math.ceil((x1 - x0) * scale), canvas.width - sx));
+    const sh = Math.max(1, Math.min(Math.ceil((y1 - y0) * scale), canvas.height - sy));
+    if (sw <= 0 || sh <= 0) return 0;
+    const data = ctx.getImageData(sx, sy, sw, sh).data;
+    const target = rgb.map((c) => Math.round(Math.min(1, Math.max(0, Number(c) || 0)) * 255));
+    let n = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 128) continue;
+      if (Math.abs(data[i] - target[0]) <= tolerance && Math.abs(data[i + 1] - target[1]) <= tolerance && Math.abs(data[i + 2] - target[2]) <= tolerance) n++;
+    }
+    try { canvas.width = canvas.height = 0; } catch { /* ignore */ }
+    return n;
+  } finally {
+    try { pdf.destroy(); } catch { /* ignore */ }
+  }
 }
 
 /** Present a comparison in a modal with a page filter and +/- split. */
@@ -3482,29 +3539,53 @@ async function applyRedactions(sanitize) {
   emit('annots');
 }
 
+async function visualProofForSave(doc, bytes) {
+  if (!doc?.bytes?.length || !bytes?.length) return bytes;
+  try {
+    setBusy(true, 'Preparing visual proof…');
+    const comparison = await buildVisualComparison(doc.bytes, bytes, { doc, scale: 1 });
+    if (!comparison.summary.changed) return bytes;
+    return await showTrustPreview(comparison, { docName: doc.name || 'Document' }) ? bytes : null;
+  } catch (e) {
+    const message = 'Visual verification unavailable — save canceled.';
+    toast(message, 'err', 6000);
+    setDocError(message);
+    console.error('visual verification failed', e);
+    return null;
+  } finally {
+    setBusy(false);
+  }
+}
+
 /**
- * Prove the redactions before the file is written.
+ * Prove the redactions and visual changes before the file is written.
  *
  * Called with the bytes a save is about to commit. If a marked string is still
  * extractable, the cover box is not a redaction and the user gets to choose:
  * turn those pages into images and re-check, keep the file as it is, or stop.
  * Returning null means "do not write".
  */
-async function proofForSave(doc, bytes) {
+export async function proofForSave(doc, bytes, verify = verifyRedactions) {
   const proof = doc.redactionProof || [];
-  if (!proof.length) return bytes;
+  if (!proof.length) return visualProofForSave(doc, bytes);
   let v;
   try {
     setBusy(true, 'Verifying redactions…');
-    v = await verifyRedactions(bytes, proof);
+    v = await verify(bytes, proof);
   } catch (e) {
     v = null;
     console.error('redaction verification failed', e);
   } finally {
     setBusy(false);
   }
-  if (!v) return bytes;                       // checker itself failed — do not block a save
-  if (v.ok) { toast(redactionVerdict(v), 'ok', 4000); return bytes; }
+  // A checker outage is not a pass: never write bytes whose redaction is unproven.
+  if (!v) {
+    const message = 'Redaction verification unavailable — save canceled.';
+    toast(message, 'err', 6000);
+    setDocError(message);
+    return null;
+  }
+  if (v.ok) { toast(redactionVerdict(v), 'ok', 4000); return visualProofForSave(doc, bytes); }
   const pages = [...new Set(v.leaks.map((l) => l.page))];
   const leakText = v.leaks.slice(0, 4).map((l) => `"${l.secret.slice(0, 60)}" (page ${l.page + 1})`).join('\n');
   const more = v.leaks.length > 4 ? `\n…and ${v.leaks.length - 4} more` : '';
@@ -3522,21 +3603,27 @@ async function proofForSave(doc, bytes) {
     ],
   });
   if (choice === 'cancel' || !choice) return null;
-  if (choice === 'keep') { toast('Saved with text still extractable under the redactions.', 'warn', 7000); return bytes; }
+  if (choice === 'keep') { toast('Saved with text still extractable under the redactions.', 'warn', 7000); return visualProofForSave(doc, bytes); }
   const items = doc.pageOps?.items || Array.from({ length: doc.numPages }, (_, i) => ({ t: 'src', i }));
   const leakPages = new Set(pages);
   doc.pageOps = { items: items.map((it) => (it.t === 'src' && leakPages.has(it.i) ? { t: 'raster', i: it.i, rects: [], dpi: 200 } : it)) };
   const re = await buildDocBytes(doc);
   let v2;
-  try { setBusy(true, 'Verifying redactions…'); v2 = await verifyRedactions(re, proof); }
+  try { setBusy(true, 'Verifying redactions…'); v2 = await verify(re, proof); }
   catch { v2 = null; }
   finally { setBusy(false); }
+  if (!v2) {
+    const message = 'Redaction verification unavailable after re-check — save canceled.';
+    toast(message, 'err', 6000);
+    setDocError(message);
+    return null;
+  }
   if (v2 && !v2.ok && v2.leaks.length) {
     alertDialog('Some content is still extractable after converting those pages to images. Review before sharing this file.', { title: 'Redaction check' });
-    return re;
+    return visualProofForSave(doc, re);
   }
   toast(v2 ? redactionVerdict(v2) : 'Pages converted — verification unavailable', 'ok', 5000);
-  return re;
+  return visualProofForSave(doc, re);
 }
 
 /* ══ Export ═════════════════════════════════════════════════════════════ */
@@ -5075,6 +5162,7 @@ export const COMMANDS = [
   ['Organize', 'Split document…', 'split', 'page:split'],
   ['Protect', 'Encrypt with password…', 'lock', 'protect:encrypt'],
   ['Protect', 'Apply redactions', 'redact', 'protect:redactAll'],
+  ['Documents', 'Batch Workbench…', 'wand', 'docs:batch'],
   ['Documents', 'Compare with another PDF…', 'compare', 'docs:compare'],
   ['Documents', 'Overlay PDF…', 'layers', 'docs:overlay'],
   ['Documents', 'Scale pages…', 'resize', 'docs:scale'],
@@ -5708,6 +5796,7 @@ function noteRecentCommand(action) {
 /** The single dispatch point for menus, ribbon, palette, quick access and the
  *  local agent API. Exported for `window.aipdf.run(action)`. */
 export async function onMenuAction(action, payload) {
+  if (hasDocumentTransaction()) return false;
   noteRecentCommand(action);
   const doc = activeDoc();
   switch (action) {
@@ -5746,13 +5835,20 @@ export async function onMenuAction(action, payload) {
       // Model-level undo first (annotations/text/stamps); when that is exhausted
       // fall back to structural undo, which reloads the file from the byte
       // stream saved before the last insert/delete/extract/reorder.
-      if (undo()) { renderAllAnnotations(); renderSidebar(); renderContext(); emit('annots'); }
-      else await undoStructure();
+      if (undo()) {
+        renderAllAnnotations(); renderSidebar();
+        // The AI dock owns live plan controls; rebuilding it would discard them.
+        if (!state.ai.dockOpen) renderContext();
+        emit('annots');
+      } else await undoStructure();
       break;
     }
     case 'edit:redo': {
-      if (redo()) { renderAllAnnotations(); renderSidebar(); renderContext(); emit('annots'); }
-      else await redoStructure();
+      if (redo()) {
+        renderAllAnnotations(); renderSidebar();
+        if (!state.ai.dockOpen) renderContext();
+        emit('annots');
+      } else await redoStructure();
       break;
     }
     case 'edit:preferences': await preferencesDialog(); break;
@@ -6017,6 +6113,7 @@ export async function onMenuAction(action, payload) {
     case 'protect:redactAll': await applyRedactions(true); break;
 
     /* ── Documents: Stirling-PDF-style batch tools ─────────────────────── */
+    case 'docs:batch': await openBatchWorkbench(); break;
     case 'docs:compare': await compareDocuments(); break;
     case 'docs:overlay': await overlayDialog(); break;
     case 'docs:scale': await scaleDialog(); break;
@@ -6054,7 +6151,7 @@ export async function onMenuAction(action, payload) {
     case 'ai:ask': openAIDock(); break;
     case 'ai:agent': state.ai.mode = 'agent'; openAIDock(); break;
     case 'ai:planEdit': {
-      const goal = await promptDialog('What should change? The agent will inspect the document and come back with a plan to approve before anything is written.', '', { title: 'Verified AI edit', okLabel: 'Plan it' });
+      const goal = await promptDialog('What should change? Describe it in plain language — “add page numbers”, “make the title blue”, “add a DRAFT watermark”, “replace Acme with Globex on every page”. The AI inspects the document and comes back with a plan to approve before anything is written.', '', { title: 'Verified AI edit', okLabel: 'Plan it' });
       if (goal && goal.trim()) { state.ai.mode = 'agent'; openAIDock(); emit('ai:planRun', goal.trim()); }
       break;
     }
@@ -6136,6 +6233,18 @@ function togglePresentation() {
 /* ══ Global wiring ══════════════════════════════════════════════════════ */
 
 function wireGlobal() {
+  // Capture before tools, forms, tabs, and keyboard shortcuts can observe user
+  // input. The plan pipeline holds this lock from staging through verification
+  // and releases it in finally; programmatic revision checks remain a backstop.
+  const blockTransactionInput = (event) => {
+    if (!hasDocumentTransaction()) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  for (const type of ['pointerdown', 'mousedown', 'keydown', 'beforeinput', 'input', 'change', 'click', 'drop', 'submit']) {
+    window.addEventListener(type, blockTransactionInput, { capture: true, passive: false });
+  }
+
   const findInput = $('#findInput');
   findInput.addEventListener('input', () => {
     state.search.query = findInput.value;
@@ -6489,6 +6598,7 @@ function renderAIDockIfNeeded() {
 }
 
 async function onWillClose() {
+  if (hasDocumentTransaction()) return;
   // Headless test modes have nobody to answer a modal, and a blocked quit
   // turns every test run into a hang. Save prompts are for real sessions only.
   const dirty = bootInfo && bootInfo.testMode ? [] : state.docs.filter((d) => d.dirty);

@@ -1,10 +1,11 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeTheme, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { start } = require('./server');
 const { buildMenu } = require('./menu');
 const { buildFontIndex, defaultDirs } = require('./fontindex');
+const { sealSettingsFile, openSettingsFile, migrateSettingsFile } = require('./secure-settings');
 
 // Milestone tracing for startup debugging. Off by default so normal launches
 // never touch the filesystem; enable with --trace (or --dev).
@@ -108,16 +109,31 @@ function reportTest(name, payload) {
 function settingsPath() {
   return path.join(app.getPath('userData'), 'settings.json');
 }
+function secureSettingsOptions() {
+  return {
+    isEncryptionAvailable: () => {
+      try { return safeStorage.isEncryptionAvailable(); } catch { return false; }
+    },
+    encryptString: (value) => safeStorage.encryptString(value),
+    decryptString: (value) => safeStorage.decryptString(value),
+  };
+}
 function loadSettings() {
   try {
-    return JSON.parse(fs.readFileSync(settingsPath(), 'utf8'));
+    const raw = JSON.parse(fs.readFileSync(settingsPath(), 'utf8'));
+    const migrated = migrateSettingsFile(raw, secureSettingsOptions());
+    if (JSON.stringify(migrated) !== JSON.stringify(raw)) {
+      try { fs.writeFileSync(settingsPath(), JSON.stringify(migrated, null, 2)); } catch { /* ignore */ }
+    }
+    return openSettingsFile(migrated, secureSettingsOptions());
   } catch {
     return {};
   }
 }
 function saveSettings(s) {
   try {
-    fs.writeFileSync(settingsPath(), JSON.stringify(s, null, 2));
+    const sealed = sealSettingsFile(s, secureSettingsOptions());
+    fs.writeFileSync(settingsPath(), JSON.stringify(sealed, null, 2));
   } catch {
     /* ignore */
   }

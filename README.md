@@ -50,8 +50,10 @@ the same interface** — not a rewrite:
 | Piece | File | Role |
 | --- | --- | --- |
 | Browser bridge | `src/renderer/js/web-shim.js` | Installs a browser `window.api` when the Electron preload has not already provided one. File open/save via the **File System Access API** (download fallback), settings in `localStorage`, uploaded fonts in **IndexedDB**, AI/TTS calls from the browser. Under Electron it exits at once, so one `index.html` serves both editions. |
-| Same-origin relay | `api/proxy.js` | A Vercel function used only when a provider does not send CORS headers (the desktop app has the same proxy in its main process). https-only, public hosts only, GET/POST only, 32 MB cap — it forwards your call to **your** chosen endpoint with **your** key. |
+| Same-origin relay | `api/proxy.js` + `api/relay-token.js` | A Vercel fallback used only when a provider does not send CORS headers. It requires a short-lived signed token, forwards only to allowlisted AI/TTS hosts, accepts GET/POST only, and caps responses at 32 MB. |
 | Build | `scripts/build-web.mjs` | Assembles `web-dist/`: the renderer plus the vendored pdf.js / pdf-lib / Tesseract libraries at the same `/v/…` routes the desktop server uses. |
+
+The web relay is not an open proxy. It forwards only to built-in AI/TTS provider hosts, requires a short-lived host-bound HMAC token from `/api/relay-token`, and applies basic per-instance rate limits. Configure `AIPDF_RELAY_SECRET` with at least 16 random characters; set `AIPDF_RELAY_EXTRA_HOSTS` to a comma-separated allowlist only when a custom provider must use the relay. Custom providers otherwise need direct CORS support or the desktop edition.
 
 **Privacy model (same as the desktop app):** your PDFs are parsed, edited,
 redacted and OCR'd entirely inside your browser tab. A file leaves the browser
@@ -65,8 +67,9 @@ native shell:
 - No system-font scan; use **upload font** in the Format panel (uploaded TTF/OTF
   fonts persist in your browser across reloads).
 - No `.bak` previous-version restore — export a copy before risky edits instead.
-- Recents remember documents but cannot reopen them after a reload unless you
-  re-pick the file (browsers cannot touch disk paths).
+- **Persistent workspace** is opt-in under Files & trust. When enabled, opened
+  PDFs are stored in IndexedDB so Recent documents reopen after a refresh;
+  browser quota is enforced and API keys are never stored.
 - Printing uses the browser print dialog.
 
 **Run or deploy it yourself:**
@@ -110,7 +113,8 @@ Mapped from the capabilities that define the category leaders:
 | **Organize** | Insert/delete/rotate/extract/reorder pages, merge documents, split, insert blank pages or pages from another PDF. | PDFelement / Nitro |
 | **Forms** | Read & fill existing AcroForm fields, create new text/checkbox/radio/dropdown/signature fields, export values to JSON/CSV. | Acrobat / PDF‑XChange |
 | **Protect** | **AES‑256 encryption** (user/owner passwords), granular permissions (print/copy/modify/annotate/fill), manual redaction marks + apply/sanitize, and remove security. **Redaction is verified, not assumed**: the text under every mark is captured before anything changes, the bytes a save is about to write are reopened with pdf.js, and each marked string is searched for. A black box over live text fails that check and says so — with one click to convert those pages to images and re‑check. Applying redactions also stops writing the finding's description into the file's annotation comments, which used to leak the category (and the AI's reason) into a "sanitized" document. | Acrobat / Nitro |
-| **Save reliability** | A save never truncates your file and then fills it. The bytes land in a sibling temp file, are flushed to the device, and only then swap in with an atomic rename, so an interrupted save leaves the **previous document whole** instead of a short, unreadable file. The revision before this one is kept as `<name>.pdf.bak` (one copy, replaced each save; a setting if you do not want it) and **File ▸ Restore Previous Version…** swaps back — the swap is two‑phase, so restoring is itself undoable. A file that carries an **applied digital signature** is announced in the status bar and the save asks before rebuilding the bytes the signature covers, because a broken signature still renders: nothing looks wrong, every validator disagrees. | Acrobat / Word |
+| **Save reliability** | A save never truncates your file and then fills it. The bytes land in a sibling temp file, are flushed to the device, and only then swap in with an atomic rename, so an interrupted save leaves the **previous document whole** instead of a short, unreadable file. The revision before this one is kept as `<name>.pdf.bak` (one copy, replaced each save; a setting if you do not want it) and **File ▸ Restore Previous Version…** swaps back — the swap is two‑phase, so restoring is itself undoable. A file that carries an **applied digital signature** is announced in the status bar and the save asks before rebuilding the bytes the signature covers, because a broken signature still renders: nothing looks wrong, every validator disagrees. |
+| **Trust Preview** | Before changed bytes are written, AiPDF renders the original and candidate PDFs, compares text and pixels, highlights changed regions, and checks them against expected edit areas. Unexplained visual changes block the save unless the user explicitly overrides the warning. | Acrobat / Word |
 | **AI assistant** | Summarize, translate, proofread, rewrite selections, ask questions about the open document (or *all* open documents at once). Responses include navigable **`[p.N]` citations** that jump to and flash the referenced passage, plus **suggested follow‑up questions** under every answer. Two trust rules: document text is fenced as `<document untrusted="true">` (a sentence inside your PDF that says "ignore your instructions" is data the model is told to report, not obey, and the fence tags are stripped from the payload so it cannot be escaped), and the **first upload of a session asks permission** — what is leaving, how much of it, and to which host. Settings ▸ *Files & trust* turns that into always‑ask, always‑allow, or never. | Acrobat AI Assistant |
 | **Verified AI editing** | The agent stops proposing and waits. Read‑only inspection → a typed edit plan → every operation resolved against the real document → **a preview card with the before/after text** → you approve → the deterministic writers apply it → the candidate file is rebuilt, reopened and searched to confirm each change. See [Verified AI editing](#verified-ai-editing--the-plan-comes-first). | blueprint‑grade, none shipped |
 | **AI Smart Redact** | One‑click scan of the current page or the whole document for sensitive data — emails, phones, SSNs/national IDs, credit cards (Luhn‑validated), IBANs, IPs, dates of birth, labelled ID numbers, street addresses and person names. A review checklist (all/none, per‑item) creates redaction marks over every located hit; "Mark + Apply & Sanitize" finishes the job in one step. Runs offline with pattern matching alone; with an AI key it also catches names, addresses and contextual data. | Foxit Smart Redact / Redactable |
@@ -197,6 +201,11 @@ space when the document is saved, so what you see is exactly what gets written.
 - The AI / Read-Aloud proxy only fetches http(s) endpoints the user
   configured, and reads every response through a size cap (5–32 MB) so a
   hostile endpoint cannot exhaust memory.
+- Desktop AI keys, AI custom-header values, and TTS provider keys are sealed
+  with Electron `safeStorage` (OS-backed encryption) before writing settings.
+  Legacy plaintext credentials migrate on first load. If OS encryption is
+  unavailable or fails, secrets are omitted rather than written in plaintext.
+  Web credentials are memory-only and are never written to localStorage.
 
 ---
 
@@ -434,7 +443,7 @@ fully **OpenAI‑compatible** and standard:
 | Setting | What it does |
 | --- | --- |
 | **Base URL** | Any OpenAI‑compatible endpoint, e.g. `https://api.openai.com/v1`, `https://openrouter.ai/api/v1`, `https://api.groq.com/openai/v1`, `http://localhost:11434/v1`. `/chat/completions` and `/models` are appended automatically. |
-| **API key** | Sent per the **Send key as** scheme below. Stored locally in the app settings file. |
+| **API key** | Sent per the **Send key as** scheme below. Desktop keys are OS-encrypted; web keys stay in memory for the current tab. |
 | **Model** | Free text **or** pick from a fetched list. |
 | **Fetch models** | Calls `GET /models` on the endpoint and fills the model dropdown — works with OpenAI, Gemini, Groq, Together, OpenRouter, DeepSeek, Ollama, LM Studio, … |
 | **Send key as** | `Authorization: Bearer` (OpenAI and most providers), `x-goog-api-key` (Google Gemini), `x-api-key`, `api-key` (Azure OpenAI), a **custom header name**, or **None** for local servers. |
@@ -442,6 +451,7 @@ fully **OpenAI‑compatible** and standard:
 | **Smart Context** | Ranks every page by relevance to your question and sends only the best‑matching pages (plus the current page) within the character budget, instead of a flat prefix. Toggle in the settings dialog or the dock chip. |
 | **Context budget / Max pages / Temperature** | Bounds on how much document text is sent and how creative the model is. |
 | **Test connection** | Sends a one‑line round trip so you can confirm the URL, key and headers before asking a real question. |
+| **Detect local AI** | Finds Ollama or LM Studio on this computer, selects an available model, and applies a no-key local profile in one click. |
 
 Presets are provided for **OpenAI, Google Gemini (native API), OpenRouter, Groq,
 Together AI, DeepSeek, Mistral, Ollama (local)** and **LM Studio (local)**, plus
@@ -550,6 +560,11 @@ payload so a page cannot end its own block early and speak as the app. The
 system prompts say the same thing to the model: content inside the fences is
 data to report, not a command to obey.
 
+**Visual Edit Copilot** is available in Anna Edit mode. For title, layout,
+colour and scanned-page requests, up to three relevant page images can be sent
+after the egress prompt is approved. Pages without a text layer are recognized
+into layout text first; unsupported edits still fail closed rather than guessing.
+
 **Sharing is a decision, not a side effect.** The first AI call of a session
 that needs to read your document names the document, how much is going, and
 which host it is going to. Answer *Allow this session*, *Allow* (remembers) or
@@ -589,6 +604,7 @@ the dialog is exactly what lands in the file.
 | **Repair…** *(Stirling port)* | Header/trailer/object health check, then rebuild-by-`copyPages`, skipping unreadable pages and reporting what survived. |
 | **Manage Attachments…** *(Stirling port)* | Add / extract / remove embedded files (the model already round-trips them through save). |
 | **Automate (Pipeline)…** *(Stirling Automate)* | Runs ticked tools in one pass — sanitize, remove-blanks, compress, grayscale, flatten — then rebuilds once. |
+| **Batch Workbench…** | Processes multiple PDFs with bounded concurrency, reusable recipes, pause/resume, per-file audit results, and individual Save As outputs. |
 
 > Raster-based tools (Compress, N-up, poster, booklet, single-strip, Flatten,
 > Adjust Colors) re-render pages as images: text on rebuilt pages becomes
@@ -617,6 +633,14 @@ on it), and the copy keeps annotations, rotation and inherited resources.
 ---
 
 ## Testing
+
+Run the complete required matrix with:
+
+```bash
+npm test
+```
+
+This chains the fast policy/unit suites, Electron render/edit/trust tests, the 120-page viewer benchmark, the Anna fresh-profile E2E, and the web build. The same command runs in `.github/workflows/ci.yml` on Windows for every PR and push to `main`.
 
 Headless, assertion‑based checks (no display required):
 

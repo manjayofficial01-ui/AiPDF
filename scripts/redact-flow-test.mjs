@@ -145,6 +145,65 @@ check('a sanitized page PASSES the integrity check',
   sanitized && sanitized.ok === true && sanitized.leaks === 0 && sanitized.checked === 1,
   JSON.stringify(sanitized && sanitized.verdict));
 
+/* ── 4. An unavailable checker cancels the save instead of passing ───────── */
+
+const unavailable = await evJson(`(async function(){
+  var st = await import('/js/store.js');
+  var app = await import('/js/app.js');
+  var d = st.activeDoc();
+  var previousProof = d.redactionProof;
+  d.redactionProof = [{ page: 0, secret: 'functional test fixture', native: true }];
+  try {
+    var result = await app.proofForSave(d, new Uint8Array([37, 80, 68, 70, 45]), async function () {
+      throw new Error('SIMULATED REDACTION CHECKER OUTAGE');
+    });
+    return JSON.stringify({ result: result === null ? 'null' : typeof result,
+      error: document.getElementById('stErr')?.textContent || '' });
+  } finally {
+    d.redactionProof = previousProof;
+  }
+})()`);
+check('an unavailable redaction verdict fails closed and cancels the save',
+  unavailable && unavailable.result === 'null' && /verification unavailable/i.test(unavailable.error),
+  JSON.stringify(unavailable));
+
+/* ── 5. The sanitize re-check also fails closed when unavailable ─────────── */
+
+const unavailableAfterSanitize = await evJson(`(async function(){
+  var st = await import('/js/store.js');
+  var app = await import('/js/app.js');
+  var d = st.activeDoc();
+  var previousProof = d.redactionProof;
+  var previousOps = d.pageOps;
+  d.redactionProof = [{ page: 0, secret: 'functional test fixture', native: true }];
+  var calls = 0;
+  var clicked = false;
+  try {
+    var pending = app.proofForSave(d, new Uint8Array([37, 80, 68, 70, 45]), async function () {
+      calls++;
+      if (calls === 1) return { ok: false, checked: 1, unverifiable: [], leaks: [{ page: 0, secret: 'functional test fixture' }] };
+      throw new Error('SIMULATED REDACTION RECHECK OUTAGE');
+    });
+    for (var i = 0; i < 200; i++) {
+      var button = Array.from(document.querySelectorAll('.modal button')).find(function (b) {
+        return /Convert to image & re-check/i.test(b.textContent || '');
+      });
+      if (button) { button.click(); clicked = true; break; }
+      await new Promise(function (resolve) { setTimeout(resolve, 50); });
+    }
+    var result = await pending;
+    return JSON.stringify({ calls: calls, clicked: clicked, result: result === null ? 'null' : typeof result,
+      error: document.getElementById('stErr')?.textContent || '' });
+  } finally {
+    d.redactionProof = previousProof;
+    d.pageOps = previousOps;
+  }
+})()`);
+check('an unavailable post-sanitize verdict fails closed and cancels the save',
+  unavailableAfterSanitize && unavailableAfterSanitize.calls === 2 && unavailableAfterSanitize.clicked
+  && unavailableAfterSanitize.result === 'null' && /verification unavailable/i.test(unavailableAfterSanitize.error),
+  JSON.stringify(unavailableAfterSanitize));
+
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 child.kill();

@@ -14,7 +14,7 @@ import { state, activeDoc, addAnnot, pushHistory, markDirty, emit, settings, sav
 import { getTextContent, pageDims } from './viewer.js';
 import { makeAnnot } from './annots.js';
 import { aiReady, configureAI, chatComplete, fenceDocument, consentToEgress } from './ai.js';
-import { extractJson, normalizePiiCandidates } from './aijson.js';
+import { extractJson, completionText, normalizePiiCandidates } from './aijson.js';
 import { PII_TYPES, DEFAULT_CATEGORIES, scanForPii, mergePii, pageTextMap, findRects } from './pii.js';
 import { el, toast, clamp } from './util.js';
 import { showModal } from './dialog.js';
@@ -148,7 +148,7 @@ async function aiCandidates(texts, cats) {
   if (!(await consentToEgress({ pages: chunks.length, chars: used, purpose: 'Finding sensitive data beyond the offline patterns' }))) return [];
   const wanted = cats.filter((c) => c !== 'other').join(', ');
   try {
-    const out = await chatComplete([
+    const reply = await chatComplete([
       {
         role: 'system',
         content: 'You find sensitive and personal data in documents. Return ONLY a valid JSON array of objects '
@@ -164,7 +164,7 @@ async function aiCandidates(texts, cats) {
       },
     ], { temperature: 0.1, maxTokens: 2000 });
     const valid = new Set([...cats, 'other']);
-    return normalizePiiCandidates(extractJson(out, 'array'), texts[texts.length - 1]?.page || 0, valid, canonType)
+    return normalizePiiCandidates(extractJson(completionText(reply), 'array'), texts[texts.length - 1]?.page || 0, valid, canonType)
       .map((c) => ({ ...c, source: 'ai' }));
   } catch (e) {
     toast('AI scan failed — keeping pattern results. ' + (e.message || '').slice(0, 80), 'warn', 5000);

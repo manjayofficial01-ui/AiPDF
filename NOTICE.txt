@@ -2,7 +2,7 @@ AiPDF Editor
 ============
 
 Product        : AiPDF Editor
-Version        : 2.27.0
+Version        : 2.27.1
 Author         : Manjay Dongol
 Publisher      : Manjay Dongol
 Website        : https://github.com/manjayofficial01-ui/AiPDF

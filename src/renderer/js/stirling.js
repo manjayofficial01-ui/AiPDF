@@ -430,6 +430,8 @@ export function repairCheck(bytes) {
 
 /* ── Page numbers (Stirling PageNumbersController) ────────────────────── */
 
+export const MAX_ROMAN_PAGE_NUMBER = 3999;
+
 export const PAGE_NUMBER_FORMATS = [
   { id: 'n', label: '1, 2, 3 …', sample: (p) => `${p}` },
   { id: 'n-of-N', label: 'Page 1 of N', sample: (p, n) => `Page ${p} of ${n}` },
@@ -452,6 +454,9 @@ export function pageNumberPlan({ formatId = 'n-of-N', from = 1, to = null, pageC
   const a = Math.min(n, Math.max(1, Math.floor(Number(from) || 1)));
   const b = to == null ? n : Math.min(n, Math.max(1, Math.floor(Number(to) || n)));
   const s0 = Math.max(0, Math.floor(Number(start) || 1));
+  if ((f.id === 'roman' || f.id === 'ROMAN') && s0 + b - a > MAX_ROMAN_PAGE_NUMBER) {
+    throw new RangeError(`Roman numbering supports labels from 1 through ${MAX_ROMAN_PAGE_NUMBER}.`);
+  }
   const pages = [];
   for (let p = a; p <= b; p++) pages.push({ page: p - 1, text: f.sample(s0 + (p - a), n) });
   return { formatId: f.id, pages };
@@ -569,6 +574,16 @@ export function runPipelineModel(doc, steps = []) {
   return { applied, skipped };
 }
 
+function pageNumberStampColor(value) {
+  if (typeof value === 'string') {
+    const hex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(value);
+    if (hex) return hex.slice(1).map((part) => parseInt(part, 16) / 255);
+  } else if (Array.isArray(value) && value.length === 3 && value.every((part) => Number.isFinite(part))) {
+    return value.map((part) => Math.min(1, Math.max(0, part)));
+  }
+  return [0.4, 0.4, 0.4];
+}
+
 /**
  * Stamp descriptors for the pipeline steps that write real PDF text. Pure:
  * app.js temporarily appends these to `doc.stamps` for the single buildPdf()
@@ -587,14 +602,17 @@ export function pipelineStamps(flags = {}, pageCount = 0) {
   };
   const pn = flags?.pageNumbers;
   if (pn && pages > 0) {
-    const plan = pageNumberPlan({ formatId: pn.formatId || 'n-of-N', pageCount: pages });
+    const plan = pageNumberPlan({
+      formatId: pn.formatId || 'n-of-N', from: pn.from, to: pn.to, start: pn.start, pageCount: pages,
+    });
     const kind = pn.scope === 'header' ? 'header' : 'footer';
     const align = pn.align || 'center';
     const fontSize = bounded(pn.fontSize, 7, 24, 10);
+    const color = pageNumberStampColor(pn.color);
     for (const p of plan.pages) {
       out.push({
         id: `pipeline-pn-${p.page + 1}`, kind, text: p.text, align, fontSize,
-        color: [0.4, 0.4, 0.4], behind: false,
+        color, behind: false,
         from: p.page + 1, to: p.page + 1, odd: 'all',
       });
     }

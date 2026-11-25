@@ -22,6 +22,7 @@ import { editableBlocks, commitBlockEdit } from './textedit.js';
 import { blockText } from './textblocks.js';
 import { resolveFontFor } from './fontresolve.js';
 import { pushMessage, renderThinking, renderAnswer, aiReady, configureAI, chatComplete, visionRequest, openAIDock, isGemini, consentToEgress, fenceToolResult, fenceDocument } from './ai.js';
+import { PAGE_NUMBER_FORMATS, pipelineStamps } from './stirling.js';
 
 const MAX_STEPS = 16;          // model turns per run
 const MAX_TOOL_CALLS = 24;     // hard cap across the whole run
@@ -83,6 +84,74 @@ export const TOOL_SPECS = [
         size: { type: 'number' },
       },
       required: ['page', 'find', 'replace'],
+    },
+  },
+  {
+    name: 'style_text',
+    description: 'Restyle an existing native text block without changing its wording — e.g. "make the title blue", "make the heading bigger and bold". Give any of color (#RRGGBB), fontSize (pt), bold, italic, underline. `find` must be text inside ONE block; the whole block is redrawn in the new style.',
+    parameters: {
+      type: 'object',
+      properties: {
+        page: { type: 'number' },
+        find: { type: 'string', description: 'exact text inside the block to restyle' },
+        color: { type: 'string', description: 'hex like #1d4ed8' },
+        fontSize: { type: 'number', description: 'font size in pt, 4–96' },
+        bold: { type: 'boolean' },
+        italic: { type: 'boolean' },
+        underline: { type: 'boolean' },
+      },
+      required: ['page', 'find'],
+    },
+  },
+  {
+    name: 'add_page_numbers',
+    description: 'Add page numbers as real text stamps in the header or footer — every page by default, or a 1-based from/to range. `start` is the first printed number; `format` picks the printed form.',
+    parameters: {
+      type: 'object',
+      properties: {
+        format: { type: 'string', enum: PAGE_NUMBER_FORMATS.map((f) => f.id), description: PAGE_NUMBER_FORMATS.map((f) => f.id).join(' | ') },
+        from: { type: 'integer', minimum: 1 },
+        to: { type: 'integer', minimum: 1 },
+        start: { type: 'integer', minimum: 1 },
+        position: { type: 'string', enum: ['header', 'footer'] },
+        align: { type: 'string', enum: ['left', 'center', 'right'] },
+        fontSize: { type: 'number' },
+        color: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'add_watermark',
+    description: 'Add a diagonal text watermark (e.g. DRAFT, CONFIDENTIAL) across every page or a 1-based from/to range. Drawn behind the page content by default; replaces an earlier watermark added by the AI.',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string' },
+        color: { type: 'string', description: 'hex like #8a8f9c' },
+        fontSize: { type: 'number', description: 'pt, 12–120' },
+        opacity: { type: 'number', description: '0.02–1' },
+        angle: { type: 'number', description: 'degrees, −90…90' },
+        from: { type: 'integer', minimum: 1 },
+        to: { type: 'integer', minimum: 1 },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'add_header_footer',
+    description: 'Add one line of header or footer text to every page or a 1-based from/to range. Tokens allowed: {page} {pages} {date} {filename}. Page numbers own the centre, so put running text left or right when both are requested. Replaces an earlier header/footer of the same position added by the AI.',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string' },
+        position: { type: 'string', enum: ['header', 'footer'] },
+        align: { type: 'string', enum: ['left', 'center', 'right'] },
+        fontSize: { type: 'number', description: 'pt, 6–72' },
+        color: { type: 'string' },
+        from: { type: 'integer', minimum: 1 },
+        to: { type: 'integer', minimum: 1 },
+      },
+      required: ['text'],
     },
   },
   {
@@ -205,6 +274,7 @@ Working rules:
 - Page numbers in tool calls are 1-based. PDF coordinates are in points with the origin at the BOTTOM-LEFT of the page; list_pages gives each page's width/height so you can place items inside the page.
 - Before editing or summarising a scanned page, run ocr_page on it.
 - replace_text: copy the find text EXACTLY from read_page output (case, spacing, punctuation). If a replace fails, re-read the page and retry once with the exact text.
+- style_text restyles a whole block without changing its wording ("make the title blue" → style_text with color). add_page_numbers, add_watermark and add_header_footer write real text stamps — use them instead of placing dozens of add_text calls.
 - Redactions and page deletions are destructive: still perform them if the user asked, but list them explicitly in your final summary.
 - Cite pages as [p.N] in your final answer. Never invent page numbers.
 - Finish with the done tool. Keep the final summary tight: what you changed, where, and anything the user should check.`;
@@ -236,6 +306,89 @@ function dims(doc, i) {
   return d;
 }
 
+/** #RRGGBB → [r, g, b] in 0–1, or null. Shared by the agent tools and the
+ *  verified-plan resolver so both refuse the same malformed values. */
+export function parseHexColor(value) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(value ?? '').trim());
+  if (!m) return null;
+  return [0, 2, 4].map((at) => parseInt(m[1].slice(at, at + 2), 16) / 255);
+}
+
+export function rgbToHex(rgb) {
+  return '#' + (Array.isArray(rgb) ? rgb : [0, 0, 0]).slice(0, 3)
+    .map((c) => Math.round(Math.min(1, Math.max(0, Number(c) || 0)) * 255).toString(16).padStart(2, '0')).join('');
+}
+
+/** style_text arguments → the commitBlockEdit options they stand for, or an error. */
+export function parseStyleOptions(a = {}) {
+  const out = { any: false };
+  if (a.color !== undefined && a.color !== null && a.color !== '') {
+    const rgb = parseHexColor(a.color);
+    if (!rgb) return { error: 'color must be a hex colour in #RRGGBB form.' };
+    out.color = rgb; out.any = true;
+  }
+  if (a.fontSize !== undefined && a.fontSize !== null && a.fontSize !== '') {
+    const size = Number(a.fontSize);
+    if (!Number.isFinite(size) || size < 4 || size > 96) return { error: 'fontSize must be a number from 4 through 96.' };
+    out.size = size; out.any = true;
+  }
+  for (const key of ['bold', 'italic', 'underline']) {
+    if (a[key] === undefined || a[key] === null) continue;
+    if (typeof a[key] !== 'boolean') return { error: `${key} must be true or false.` };
+    out[key] = a[key]; out.any = true;
+  }
+  return out;
+}
+
+/** Fold bold/italic into a Standard-14 family name — the form the writer reads
+ *  the weight back from. A custom/embedded face keeps its own name. */
+export function styledFamily(family, bold, italic) {
+  const base = String(family || 'Helvetica').replace(/-(BoldOblique|BoldItalic|Bold|Oblique|Italic)$/i, '');
+  const std = /times|serif/i.test(base) ? 'Times' : /courier|mono|console/i.test(base) ? 'Courier' : /helvetica|arial|sans/i.test(base) ? 'Helvetica' : null;
+  if (!std) return family;
+  return `${std}${bold ? '-Bold' : ''}${italic ? '-Oblique' : ''}`;
+}
+
+/** 1-based inclusive from/to for a stamp; defaults to the whole document. */
+export function stampRange(a = {}, numPages) {
+  const from = a.from === undefined ? 1 : a.from;
+  const to = a.to === undefined ? numPages : a.to;
+  if (!Number.isInteger(from) || from < 1 || from > numPages) return { error: `from must be an integer from 1 through ${numPages}.` };
+  if (!Number.isInteger(to) || to < 1 || to > numPages) return { error: `to must be an integer from 1 through ${numPages}.` };
+  if (from > to) return { error: 'from must be less than or equal to to.' };
+  return { from, to };
+}
+
+/* Stamps the AI adds carry an `ai-<kind>-…` id so a repeated request replaces
+ * its own earlier group instead of stacking a second copy on the page. */
+export function isAiStamp(st, kind) { return String(st?.id || '').startsWith(`ai-${kind}-`); }
+function aiStampId(kind) { return `ai-${kind}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
+export function stampsOverlap(a, b) { return (a.from || 1) <= (b.to || 1e9) && (b.from || 1) <= (a.to || 1e9); }
+
+/**
+ * The stamps for one page-numbering request: one per target page, ids in the
+ * `ai-page-numbers-<page>` group. Shared by the verified plan and the direct
+ * agent tool so both write exactly the same thing.
+ */
+export function pageNumberStamps(doc, args) {
+  const range = stampRange(args, doc.numPages);
+  if (range.error) return range;
+  let align = args.align === undefined ? 'center' : args.align;
+  let moved = false;
+  // AI running text in the same band owns its centre; numbers go right
+  // instead of on top of it, and the caller's note says so.
+  if (align === 'center' && (doc.stamps || []).some((st) => (isAiStamp(st, 'header') || isAiStamp(st, 'footer'))
+    && st.kind === (args.position === 'header' ? 'header' : 'footer')
+    && (st.parts || []).some((p) => p.align === 'center') && stampsOverlap(range, st))) {
+    align = 'right'; moved = true;
+  }
+  const stamps = pipelineStamps({ pageNumbers: {
+    formatId: args.format, from: range.from, to: range.to, start: args.start,
+    scope: args.position, align, fontSize: args.fontSize, color: args.color,
+  } }, doc.numPages).map((stamp) => ({ ...stamp, id: `ai-page-numbers-${stamp.from}` }));
+  return { stamps, range, align, moved };
+}
+
 /** Locate a search term on a page and return a PDF-space rect, or null. */
 async function locateRect(doc, pageIndex, needle) {
   if (!needle) return null;
@@ -263,7 +416,7 @@ async function locateRect(doc, pageIndex, needle) {
 
 /* ── Tool implementations ──────────────────────────────────────────────── */
 
-const MUTATING = new Set(['add_text', 'replace_text', 'add_note', 'add_textbox', 'add_highlight', 'add_shape', 'add_redaction', 'rotate_pages', 'delete_pages', 'insert_blank_page', 'set_metadata']);
+const MUTATING = new Set(['add_text', 'replace_text', 'style_text', 'add_page_numbers', 'add_watermark', 'add_header_footer', 'add_note', 'add_textbox', 'add_highlight', 'add_shape', 'add_redaction', 'rotate_pages', 'delete_pages', 'insert_blank_page', 'set_metadata']);
 let mutations = 0;
 
 /**
@@ -361,11 +514,12 @@ export const TOOLS = {
     return { ok: true, page: i + 1, page_size: { w: Math.round(w), h: Math.round(h) }, note: 'Placed at the given baseline. Use view_page to confirm visually.' };
   },
 
-  async replace_text(doc, a, { commit }) {
+  async replace_text(doc, a, { commit, deferCommit = false, transactionToken }) {
     const i = clamp(Number(a.page) - 1, 0, doc.numPages - 1);
     const find = String(a.find || '');
     if (!find) return { ok: false, error: 'find cannot be empty.' };
-    const blocks = await editableBlocks(i);
+    const blocks = await editableBlocks(i, doc);
+    if (activeDoc() !== doc) return { ok: false, error: 'The document was switched while the text block was being read.' };
     const block = blocks.find((b) => blockText(doc, i, b).includes(find));
     if (!block) return { ok: false, error: `No editable native text block on page ${i + 1} contains that exact text. OCR-only or rotated text cannot be safely replaced as a native block.` };
     const old = blockText(doc, i, block);
@@ -374,6 +528,7 @@ export const TOOLS = {
     // agent has nobody to ask, and a Standard-14 face silently writes 0x3F for
     // every character outside WinAnsi — unrecoverable once saved.
     const cap = await resolveFontFor(block.fontFamily, next, doc.bytes);
+    if (activeDoc() !== doc) return { ok: false, error: 'The document was switched while the replacement font was being resolved.' };
     if (cap.missing.length) {
       return {
         ok: false,
@@ -381,11 +536,111 @@ export const TOOLS = {
       };
     }
     const changed = await commitBlockEdit(i, block, next, {
+      doc,
       label: `AI replaced text on page ${i + 1}`,
       size: a.size ? clamp(Number(a.size), 4, 96) : undefined,
+      deferCommit, transactionToken,
     });
     return changed ? { ok: true, page: i + 1, note: 'Updated the whole text block. Whether the original operators were removed or only covered is decided at save time — check the save report. Inspect layout before saving.' }
       : { ok: false, error: 'Replacement did not change the block.' };
+  },
+
+  async style_text(doc, a, { commit, deferCommit = false, transactionToken }) {
+    const i = clamp(Number(a.page) - 1, 0, doc.numPages - 1);
+    const find = String(a.find || '');
+    if (!find) return { ok: false, error: 'find cannot be empty — say which text to restyle.' };
+    const style = parseStyleOptions(a);
+    if (style.error) return { ok: false, error: style.error };
+    if (!style.any) return { ok: false, error: 'Nothing to change — give a color, fontSize, bold, italic or underline.' };
+    const blocks = await editableBlocks(i, doc);
+    if (activeDoc() !== doc) return { ok: false, error: 'The document was switched while the text block was being read.' };
+    const block = blocks.find((b) => blockText(doc, i, b).includes(find));
+    if (!block) return { ok: false, error: `No editable native text block on page ${i + 1} contains that exact text. OCR-only text cannot be restyled as a native block.` };
+    const text = blockText(doc, i, block);
+    const options = { doc, label: `AI restyled text on page ${i + 1}` };
+    if (style.color) options.color = style.color;
+    if (style.size) options.size = style.size;
+    if (style.bold !== undefined || style.italic !== undefined) options.fontFamily = styledFamily(block.fontFamily, style.bold, style.italic);
+    if (style.bold !== undefined) options.bold = style.bold;
+    if (style.italic !== undefined) options.italic = style.italic;
+    if (style.underline !== undefined) options.underline = style.underline;
+    options.deferCommit = deferCommit;
+    options.transactionToken = transactionToken;
+    const changed = await commitBlockEdit(i, block, text, options);
+    return changed ? { ok: true, page: i + 1, note: `Restyled the block "${text.replace(/\s+/g, ' ').slice(0, 60)}".` }
+      : { ok: false, error: 'The block was not changed.' };
+  },
+
+  async add_page_numbers(doc, a, { commit }) {
+    const format = a.format === undefined ? 'n-of-N' : a.format;
+    if (!PAGE_NUMBER_FORMATS.some((f) => f.id === format)) return { ok: false, error: `format must be one of: ${PAGE_NUMBER_FORMATS.map((f) => f.id).join(', ')}.` };
+    const start = a.start === undefined ? 1 : a.start;
+    if (!Number.isInteger(start) || start < 1) return { ok: false, error: 'start must be an integer of at least 1.' };
+    const position = a.position === undefined ? 'footer' : a.position;
+    if (position !== 'header' && position !== 'footer') return { ok: false, error: 'position must be header or footer.' };
+    const fontSize = a.fontSize === undefined ? 10 : Number(a.fontSize);
+    if (!Number.isFinite(fontSize) || fontSize < 7 || fontSize > 24) return { ok: false, error: 'fontSize must be a number from 7 through 24.' };
+    const color = a.color === undefined ? [0.4, 0.4, 0.4] : parseHexColor(a.color);
+    if (!color) return { ok: false, error: 'color must be a hex colour in #RRGGBB form.' };
+    if (a.align !== undefined && !['left', 'center', 'right'].includes(a.align)) return { ok: false, error: 'align must be left, center, or right.' };
+    const built = pageNumberStamps(doc, { format, from: a.from, to: a.to, start, position, align: a.align, fontSize, color });
+    if (built.error) return { ok: false, error: built.error };
+    doc.stamps = [...(doc.stamps || []).filter((st) => !isAiStamp(st, 'page-numbers')), ...built.stamps];
+    commit(`Page numbers on page${built.range.to > built.range.from ? 's' : ''} ${built.range.from}${built.range.to > built.range.from ? '–' + built.range.to : ''}`);
+    return { ok: true, pages: [built.range.from, built.range.to], count: built.stamps.length, align: built.align, moved: built.moved };
+  },
+
+  async add_watermark(doc, a, { commit }) {
+    const text = String(a.text || '').replace(/\s+/g, ' ').trim();
+    if (!text) return { ok: false, error: 'Watermark text cannot be empty.' };
+    if (text.length > 120) return { ok: false, error: 'Watermark text is limited to 120 characters.' };
+    const range = stampRange(a, doc.numPages);
+    if (range.error) return { ok: false, error: range.error };
+    const color = a.color === undefined ? [0.54, 0.56, 0.61] : parseHexColor(a.color);
+    if (!color) return { ok: false, error: 'color must be a hex colour in #RRGGBB form.' };
+    const fontSize = a.fontSize === undefined ? 52 : Number(a.fontSize);
+    if (!Number.isFinite(fontSize) || fontSize < 12 || fontSize > 120) return { ok: false, error: 'fontSize must be a number from 12 through 120.' };
+    const opacity = a.opacity === undefined ? 0.16 : Number(a.opacity);
+    if (!Number.isFinite(opacity) || opacity < 0.02 || opacity > 1) return { ok: false, error: 'opacity must be a number from 0.02 through 1.' };
+    const angle = a.angle === undefined ? -45 : Number(a.angle);
+    if (!Number.isFinite(angle) || angle < -90 || angle > 90) return { ok: false, error: 'angle must be a number from -90 through 90.' };
+    const replaced = (doc.stamps || []).some((st) => isAiStamp(st, 'watermark'));
+    doc.stamps = [...(doc.stamps || []).filter((st) => !isAiStamp(st, 'watermark')), {
+      id: aiStampId('watermark'), kind: 'watermark', text, image: null,
+      fontSize, color, opacity, angle, scale: 60, behind: true,
+      from: range.from, to: range.to, odd: 'all',
+    }];
+    commit(`Watermark "${text}" on page${range.to > range.from ? 's' : ''} ${range.from}${range.to > range.from ? '–' + range.to : ''}`);
+    return { ok: true, pages: [range.from, range.to], text, replaced };
+  },
+
+  async add_header_footer(doc, a, { commit }) {
+    const text = String(a.text || '').replace(/\s+/g, ' ').trim();
+    if (!text) return { ok: false, error: 'Header/footer text cannot be empty.' };
+    if (text.length > 160) return { ok: false, error: 'Header/footer text is limited to 160 characters.' };
+    const position = a.position === undefined ? 'footer' : a.position;
+    if (position !== 'header' && position !== 'footer') return { ok: false, error: 'position must be header or footer.' };
+    let align = a.align === undefined ? 'center' : a.align;
+    if (!['left', 'center', 'right'].includes(align)) return { ok: false, error: 'align must be left, center, or right.' };
+    const range = stampRange(a, doc.numPages);
+    if (range.error) return { ok: false, error: range.error };
+    const color = a.color === undefined ? [0.23, 0.25, 0.29] : parseHexColor(a.color);
+    if (!color) return { ok: false, error: 'color must be a hex colour in #RRGGBB form.' };
+    const fontSize = a.fontSize === undefined ? 9 : Number(a.fontSize);
+    if (!Number.isFinite(fontSize) || fontSize < 6 || fontSize > 72) return { ok: false, error: 'fontSize must be a number from 6 through 72.' };
+    // AI page numbers own the centre of their band; running text that would
+    // land on top of them moves to the left, and the result says so.
+    let moved = false;
+    if (align === 'center' && (doc.stamps || []).some((st) => isAiStamp(st, 'page-numbers') && st.kind === position && stampsOverlap(range, st))) {
+      align = 'left'; moved = true;
+    }
+    const replaced = (doc.stamps || []).some((st) => isAiStamp(st, position));
+    doc.stamps = [...(doc.stamps || []).filter((st) => !isAiStamp(st, position)), {
+      id: aiStampId(position), kind: position, parts: [{ text, align }],
+      fontSize, color, margin: 28, behind: true, from: range.from, to: range.to, odd: 'all', start: 1,
+    }];
+    commit(`${position === 'header' ? 'Header' : 'Footer'} "${text}" on page${range.to > range.from ? 's' : ''} ${range.from}${range.to > range.from ? '–' + range.to : ''}`);
+    return { ok: true, pages: [range.from, range.to], text, position, align, moved, replaced };
   },
 
   async add_note(doc, a, { commit }) {
@@ -476,30 +731,33 @@ export const TOOLS = {
     return { ok: true, page: i + 1, note: 'Redaction is marked; it is applied (content truly removed) when the document is saved with Apply-redactions.' };
   },
 
-  async rotate_pages(doc, a, { commit }) {
+  async rotate_pages(doc, a, { commit, deferCommit = false }) {
     const { rotatePages } = await import('./pages.js');
     const idx = parsePageRange(a.pages, doc.numPages);
     if (!idx.length) return { ok: false, error: 'No valid page numbers in range.' };
     const deg = [90, 180, 270].includes(Number(a.degrees)) ? Number(a.degrees) : 90;
-    await rotatePages(idx, deg);
+    const changed = await rotatePages(idx, deg, { doc, deferCommit });
+    if (!changed) return { ok: false, error: 'The document changed before the rotation could be applied.' };
     commit(`Rotated pages ${idx.map((i) => i + 1).join(', ')} by ${deg}°`, { noHistory: true });
     return { ok: true, pages: idx.map((i) => i + 1), degrees: deg };
   },
 
-  async delete_pages(doc, a, { commit }) {
+  async delete_pages(doc, a, { commit, deferCommit = false }) {
     const { deletePages } = await import('./pages.js');
     const idx = parsePageRange(a.pages, doc.numPages);
     if (!idx.length) return { ok: false, error: 'No valid page numbers in range.' };
     if (idx.length >= doc.numPages) return { ok: false, error: 'Refusing to delete every page.' };
-    await deletePages(idx);
+    const changed = await deletePages(idx, { doc, deferCommit });
+    if (!changed) return { ok: false, error: 'The document changed before the pages could be deleted.' };
     commit(`Deleted pages ${idx.map((i) => i + 1).join(', ')}`, { noHistory: true });
     return { ok: true, deleted: idx.map((i) => i + 1) };
   },
 
-  async insert_blank_page(doc, a, { commit }) {
+  async insert_blank_page(doc, a, { commit, deferCommit = false }) {
     const { insertBlankAt } = await import('./pages.js');
     const after = clamp(Number(a.after) || 0, 0, doc.numPages);
-    await insertBlankAt(after);
+    const changed = await insertBlankAt(after, { doc, deferCommit });
+    if (!changed) return { ok: false, error: 'The document changed before the blank page could be inserted.' };
     commit(`Blank page inserted after page ${after}`, { noHistory: true });
     return { ok: true, inserted_at: after + 1 };
   },
@@ -565,8 +823,8 @@ export async function runAgent(goal) {
     commits.push(label);
     // Tools that delegate to pages.js (rotate/delete/insert) already push a
     // history entry themselves — pushing again would need two undos per edit.
-    if (!opts.noHistory) { try { pushHistory('ai agent: ' + label); } catch { /* history full */ } }
-    markDirty('ai agent');
+    if (!opts.noHistory) { try { pushHistory('ai agent: ' + label, doc); } catch { /* history full */ } }
+    markDirty('ai agent', doc);
   };
 
   pushMessage('user', goal, []);
@@ -686,7 +944,7 @@ export function agentSelfTest() {
   const out = { checks: {}, errors: [] };
   try {
     out.specs = TOOL_SPECS.map((t) => t.name);
-    const want = ['list_pages', 'read_page', 'search_document', 'ocr_page', 'view_page', 'add_text', 'replace_text', 'add_note', 'add_textbox', 'add_highlight', 'add_shape', 'add_redaction', 'rotate_pages', 'delete_pages', 'insert_blank_page', 'set_metadata', 'done'];
+    const want = ['list_pages', 'read_page', 'search_document', 'ocr_page', 'view_page', 'add_text', 'replace_text', 'style_text', 'add_page_numbers', 'add_watermark', 'add_header_footer', 'add_note', 'add_textbox', 'add_highlight', 'add_shape', 'add_redaction', 'rotate_pages', 'delete_pages', 'insert_blank_page', 'set_metadata', 'done'];
     out.checks.allToolsRegistered = want.every((n) => out.specs.includes(n));
     out.checks.openAiShape = TOOLS_OPENAI.length === TOOL_SPECS.length && TOOLS_OPENAI[0].type === 'function';
     out.checks.pageRange = JSON.stringify(parsePageRange('1-3, 5', 10)) === JSON.stringify([0, 1, 2, 4]);

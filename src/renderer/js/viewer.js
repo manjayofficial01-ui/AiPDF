@@ -156,10 +156,17 @@ export async function buildPages(doc) {
   setRulersReady(true);
 }
 
+function ensureCanvas(rec) {
+  if (!rec.canvasEl) {
+    rec.canvasEl = el('canvas', { class: 'pdf' });
+    rec.wrap.insertBefore(rec.canvasEl, rec.wrap.firstChild);
+  }
+  return rec.canvasEl;
+}
+
 function createPageEl(i) {
   const d = activeDoc();
   const wrap = el('div', { class: 'page', dataset: { i: String(i) } });
-  const canvas = el('canvas', { class: 'pdf' });
   const textLayer = el('div', { class: 'textLayer' });
   const annSvgWrap = el('div', { class: 'annLayer' });
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -169,10 +176,14 @@ function createPageEl(i) {
   const formLayer = el('div', { class: 'formLayer', style: { position: 'absolute', inset: '0', pointerEvents: 'none' } });
   const toolLayer = el('div', { class: 'toolLayer', style: { position: 'absolute', inset: '0' } });
   const flash = el('div', { class: 'page-flash' });
-  wrap.append(canvas, textLayer, annSvgWrap, formLayer, toolLayer, flash);
+  wrap.append(textLayer, annSvgWrap, formLayer, toolLayer, flash);
   pagesRoot.appendChild(wrap);
 
-  const rec = { i, wrap, canvas, textLayer, svg, formLayer, toolLayer, flash, viewport: null, scale: 0, rendered: false, renderTask: null, textContent: null, textBuilt: false };
+  const rec = {
+    i, wrap, canvasEl: null, textLayer, svg, formLayer, toolLayer, flash,
+    get canvas() { return ensureCanvas(this); },
+    viewport: null, scale: 0, rendered: false, renderTask: null, textContent: null, textBuilt: false,
+  };
   pageEls.set(i, rec);
   io && io.observe(wrap);
   return rec;
@@ -389,10 +400,12 @@ function unrenderPage(i) {
 
 /* ── Text layer ─────────────────────────────────────────────────────────── */
 
-export async function getTextContent(i) {
-  const d = activeDoc();
+export async function getTextContent(i, doc = activeDoc()) {
+  const d = doc;
   if (!d) return null;
-  const rec = pageEls.get(i);
+  // The DOM cache belongs to the active document. An inactive captured document
+  // must read its own proxy rather than inherit the newly active page's text.
+  const rec = activeDoc() === d ? pageEls.get(i) : null;
   if (rec && rec.textContent) return rec.textContent;
   const page = await d.pdf.getPage(i + 1);
   const tc = await page.getTextContent({ normalizeWhitespace: false, includeMarkedContent: false });
@@ -686,7 +699,7 @@ export function rerenderAllPages() {
     if (rec.renderTask) { try { rec.renderTask.cancel(); } catch {} rec.renderTask = null; }
     rec.rendered = false;
     rec.textBuilt = false;
-    if (rec.canvas) { rec.canvas.width = rec.canvas.height = 0; }
+    if (rec.canvasEl) { rec.canvasEl.width = rec.canvasEl.height = 0; }
   }
   document.querySelectorAll('.thumb canvas').forEach((cv) => { cv.dataset.done = ''; });
   renderVisible();

@@ -72,11 +72,22 @@ export async function reloadDocFromBytes(doc, bytes, message = null) {
  * pre-change bytes are pushed onto the structural-undo stack so Ctrl+Z can
  * walk the document back an operation at a time. */
 async function commitStructure(doc, { toastMsg } = {}) {
+  if (!doc || activeDoc() !== doc) throw new Error('The document changed before the structural commit.');
   const before = doc.bytes;
   const bytes = await buildPdf(doc, {});
-  await reloadDocFromBytes(doc, bytes, null);
-  pushStructUndo(before);
+  await commitPrebuiltStructure(doc, bytes, { beforeBytes: before });
   if (toastMsg) toast(toastMsg, 'ok');
+}
+
+/** Commit the exact candidate bytes that were independently verified. Kept
+ *  separate from buildPdf so a transactional plan cannot rebuild a different
+ *  file after verification or reload before verification succeeds. */
+export async function commitPrebuiltStructure(doc, bytes, { beforeBytes, message = null } = {}) {
+  if (!doc || activeDoc() !== doc || !bytes || !bytes.length) {
+    throw new Error('The document changed before the verified bytes could be committed.');
+  }
+  await reloadDocFromBytes(doc, bytes, message);
+  pushStructUndo(beforeBytes, doc);
 }
 
 /* ── Native objects on a page ─────────────────────────────────────────────── */
@@ -193,41 +204,47 @@ export async function redoStructure() {
   return true;
 }
 
-export async function deletePages(indices) {
-  const doc = activeDoc();
-  if (!doc) return;
+export async function deletePages(indices, { deferCommit = false, doc: targetDoc } = {}) {
+  const doc = targetDoc || activeDoc();
+  if (!doc || activeDoc() !== doc) return false;
   const items = ensureOps(doc);
   const kill = new Set(indices);
   doc.pageOps.items = items.filter((it) => !(it.t === 'src' && kill.has(it.i)));
   if (!doc.pageOps.items.length) {
     toast('Cannot delete every page.', 'err');
     doc.pageOps.items = items;
-    return;
+    return false;
   }
+  if (deferCommit) return true;
   await commitStructure(doc, { toastMsg: `Deleted ${indices.length} page(s)` });
+  return true;
 }
 
-export async function rotatePages(indices, delta) {
-  const doc = activeDoc();
-  if (!doc) return;
+export async function rotatePages(indices, delta, { deferCommit = false, doc: targetDoc } = {}) {
+  const doc = targetDoc || activeDoc();
+  if (!doc || activeDoc() !== doc) return false;
   for (const i of indices) {
     doc.pageRotate[i] = ((doc.pageRotate[i] || 0) + delta + 360) % 360;
   }
-  pushHistory('rotate');
+  if (deferCommit) return true;
+  pushHistory('rotate', doc);
   const keep = doc.currentPage ?? 0;
   relayout(true);
   renderVisible();
   scrollToPage(keep, { smooth: false });
   emit('annots');
+  return true;
 }
 
-export async function insertBlankAt(index) {
-  const doc = activeDoc();
-  if (!doc) return;
+export async function insertBlankAt(index, { deferCommit = false, doc: targetDoc } = {}) {
+  const doc = targetDoc || activeDoc();
+  if (!doc || activeDoc() !== doc) return false;
   const items = ensureOps(doc);
   items.splice(index, 0, { t: 'blank', w: 595.28, h: 841.89 });
+  if (deferCommit) return true;
   await commitStructure(doc, { toastMsg: 'Blank page inserted' });
   scrollToPage(index);
+  return true;
 }
 
 export async function insertFromPdfAt(index) {

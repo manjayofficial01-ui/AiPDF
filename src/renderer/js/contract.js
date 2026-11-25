@@ -12,7 +12,7 @@
 import { state, activeDoc, emit } from './store.js';
 import { scrollToPage } from './viewer.js';
 import { pushMessage, renderAnswer, renderThinking, aiReady, configureAI, chatComplete, contextFor, openAIDock, fenceDocument, consentToEgress } from './ai.js';
-import { extractJson, normalizeContract } from './aijson.js';
+import { extractJson, completionText, normalizeContract } from './aijson.js';
 import { el, escapeHtml, miniMarkdown, toast } from './util.js';
 
 const SYSTEM = `You are a contract analyst inside a PDF editor.
@@ -142,8 +142,9 @@ export async function runContractReview() {
 }
 
 async function callAI(ctx) {
-  return chatComplete([
+  const reply = await chatComplete([
     { role: 'system', content: SYSTEM },
     { role: 'user', content: `DOCUMENT CONTEXT\n${fenceDocument(ctx.text)}\n\nAnalyse this document.` },
   ], { temperature: 0.2, maxTokens: 2200 });
+  return completionText(reply);
 }

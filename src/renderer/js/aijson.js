@@ -11,6 +11,13 @@
 const MAX_FOLLOWUPS = 3;
 const MAX_OUTLINE_NODES = 120;
 
+export function completionText(reply) {
+  if (typeof reply === 'string') return reply;
+  if (typeof reply?.text === 'string') return reply.text;
+  if (typeof reply?.content === 'string') return reply.content;
+  return '';
+}
+
 /** Find and parse the first balanced JSON value in a model response.
  *  kind: 'array' | 'object' | 'any' (default). Returns null when nothing
  *  parseable of the requested kind is present — callers must handle null. */

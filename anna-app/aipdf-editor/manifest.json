@@ -1,7 +1,7 @@
 {
   "schema": 4,
   "tags": ["pdf", "editor", "ocr", "ai", "productivity"],
-  "system_prompt_addendum": "AiPDF Editor is a complete in-browser PDF editor. When the user mentions this app, open the 'main' view so they can work on their PDF directly. The app views, comments, edits text and objects, organizes pages, fills forms, encrypts, redacts (verified), OCRs scans (English/Nepali/Hindi, offline), runs forensics and accessibility checks, and reads documents aloud. Its AI features — summarize, translate, proofread, document Q&A with [p.N] citations, contract review, smart redaction, AI outline and AI-vision OCR — call Anna's host model on the user's behalf and consume the user's Anna credits. The user's PDF itself is processed entirely inside the app window and never uploaded; only text the user explicitly sends to an AI feature goes to the host model. If asked how to do something to a PDF, prefer doing it in the app over explaining manual steps.",
+  "system_prompt_addendum": "AiPDF Editor is a complete in-browser PDF editor. When the user mentions this app, open the 'main' view so they can work on their PDF directly. The app views, comments, edits text and objects, organizes pages, fills forms, encrypts, redacts (verified), OCRs scans (English/Nepali/Hindi, offline), runs forensics and accessibility checks, and reads documents aloud. Its AI can summarize, translate, proofread, answer document Q&A with [p.N] citations, review contracts, find sensitive data, outline documents, OCR difficult scans, and turn natural-language requests such as 'add page numbers' or 'make the title blue' into a reviewable edit plan. Nothing changes until the user approves, and applied edits are verified against rebuilt PDF bytes. These AI features call Anna's host model on the user's behalf and consume the user's Anna credits. Parsing and editing stay inside the app window; only text or page images the user explicitly consents to send for an AI feature go to the host model. If asked how to do something to a PDF, prefer doing it in the app over explaining manual steps.",
   "ui": {
     "bundle": {
       "format": "static-spa",
@@ -25,6 +25,7 @@
     "state_merge": "last_writer_wins"
   },
   "dev": {
+    "fixtures": ["fixtures/replies.jsonl"],
     "mocks": {
       "llm.complete": {
         "result": {

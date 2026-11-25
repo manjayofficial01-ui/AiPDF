@@ -26,12 +26,30 @@ node scripts/build-anna.mjs   # assemble + quota-audit anna-app/aipdf-editor/bun
   the host LLM via `anna.llm.complete` (text + image blocks, system-role fallback). No API
   key; usage bills to the signed-in user's Anna credits. Explicitly configured BYOK
   providers are respected and keep working when the user picks them.
+- **AI editing**: Edit mode turns natural-language requests into a bounded, typed proposal.
+  Nothing changes before approval; approved operations stage in memory, rebuild candidate
+  bytes, verify the result, and commit once for undo/redo. Page numbers and exact native
+  title recoloring are supported, with ambiguous or unverifiable targets rejected.
+- **Privacy**: parsing and editing stay in the app window. The app asks before sending the
+  document text or page images needed for a consented AI request.
 - **OCR packs**: the bundle ships the `tessdata_fast` English pack (the vendored best pack
   is 10.4 MB and would bust Anna's 10 MB per-file cap) plus the vendored Nepali/Hindi packs,
   and only the three LSTM-only Tesseract cores (the app creates workers with OEM 1).
 - **Read aloud**: uses the browser's built-in speech synthesis; cloud TTS providers are
   still selectable but require the desktop/web edition (the Anna bundle CSP blocks
   third-party endpoints — stated honestly in the listing).
+
+## Fresh-install verification
+
+```bash
+npm run test:anna-adapter   # scripted host-SDK boundary, no network
+npm run test:anna-e2e       # real Anna dispatcher + fresh Chromium profile
+anna-app validate --strict  # run inside this directory
+```
+
+The E2E gate uses deterministic host-LLM fixtures and exercises upload, Q&A, page-number
+and title-color plans, rejection/approval, undo/redo, Save As download, saved-byte checks,
+reopen, responsive layouts, CSP/network guards, and temporary-profile cleanup.
 
 ## Publishing
 

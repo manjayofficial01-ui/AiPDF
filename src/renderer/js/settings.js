@@ -413,6 +413,16 @@ function buildTrust(W) {
   g.appendChild(row('Keep the previous version on save',
     toggle(val('backupBeforeSave'), 'Keep the previous version on save', W.set('backupBeforeSave')),
     'A save rewrites the whole file, so the revision before it is kept as name.pdf.bak — one copy of the document you are editing, replaced each save. File ▸ Restore Previous Version… puts it back.'));
+  if (typeof window.api.workspaceUsage === 'function') {
+    const usage = el('div', { class: 'set-hint', text: 'Stored only in this browser. You can remove working copies from the API or by clearing site data.' });
+    g.appendChild(row('Keep working copies in this browser',
+      toggle(val('webWorkspace'), 'Keep working copies in this browser', W.set('webWorkspace')),
+      'When enabled, opened PDFs are saved into browser storage so Recent documents can reopen after a refresh. API keys are never included.'));
+    g.appendChild(usage);
+    window.api.workspaceUsage().then((info) => {
+      usage.textContent = `${(info.usage / 1024 / 1024).toFixed(1)} MB stored of ${(info.quota / 1024 / 1024).toFixed(0)} MB available in this browser.`;
+    }).catch(() => {});
+  }
   g.appendChild(row('Sending document text to the AI',
     select(val('aiEgress'), [
       ['ask', 'Ask before the first upload of a session'],

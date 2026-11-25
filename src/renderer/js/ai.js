@@ -4,7 +4,8 @@ import { el, escapeHtml, miniMarkdown, toast, clamp, diffHtml } from './util.js'
 import { showModal, formRow } from './dialog.js';
 import { svgIcon } from './icons.js';
 import { createTextEditFromSelection } from './textedit.js';
-import { extractJson, normalizeFollowups, normalizeOutline } from './aijson.js';
+import { extractJson, completionText, normalizeFollowups, normalizeOutline } from './aijson.js';
+import { detectLocalAi, applyLocalAiSettings } from './local-ai.js';
 
 const MAX_CONTEXT_CHARS = 26000;
 
@@ -383,6 +384,11 @@ export function isGemini(cfg = settings.ai) {
   return a.provider === 'gemini' || /generativelanguage\.googleapis\.com/i.test(a.baseUrl || '');
 }
 
+/** Anna's host completion bridge has no provider-specific model selector. */
+export function isAnnaProvider(ai = settings.ai) {
+  return !!ai && ai.baseUrl === 'anna://host';
+}
+
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
 /** Normalised Gemini base: accepts "…/v1beta", "…/v1" or even a full pasted
@@ -569,6 +575,31 @@ export async function chatComplete(messages, { tools = null, temperature, maxTok
     args: safeJsonArgs(tc.function?.arguments),
   }));
   return { text: msg.content || '', toolCalls };
+}
+
+/**
+ * One plain-text completion for providers such as Anna that do not expose
+ * OpenAI tool calls. JSON is requested in the prompt; the caller still has to
+ * validate the untrusted reply before using it.
+ */
+export async function structuredComplete(messages, { temperature, maxTokens } = {}) {
+  const a = settings.ai;
+  const body = {
+    messages: [...(messages || []), {
+      role: 'user',
+      content: 'Return only valid JSON: one JSON object, with no Markdown fences or prose.',
+    }],
+    temperature: temperature ?? a.temperature ?? 0.1,
+    stream: false,
+  };
+  // The Anna host chooses its own model. Other OpenAI-shaped callers retain the
+  // configured selector, but no selector is sent to anna://host.
+  if (!isAnnaProvider(a)) body.model = a.model || 'gpt-4o-mini';
+  if (maxTokens) body.max_tokens = maxTokens;
+  const json = await postJson(endpoint('chat/completions'), headers(), body);
+  const choice = json?.choices?.[0] || {};
+  const text = typeof choice.message?.content === 'string' ? choice.message.content : '';
+  return { text, stopReason: choice.finish_reason === 'length' ? 'maxTokens' : 'stop' };
 }
 
 /**
@@ -761,6 +792,10 @@ export async function ask(question, scope = 'auto') {
       renderAnswer(aiEl, acc, ctx.pages);
     });
     renderAnswer(aiEl, text || '(no response)', ctx.pages);
+    // A question that is really an edit request ("add page numbers", "make the
+    // title blue") still gets its answer — and then a one-click route into the
+    // verified plan, so the change does not depend on finding Edit mode.
+    if (text && looksLikeEditRequest(question)) renderEditOffer(aiEl, question);
     // Acrobat AI Assistant-style suggested follow-ups — best-effort, never
     // blocks or fails the answer itself.
     if (text) suggestFollowups(aiEl, question, text, ctxScope);
@@ -775,6 +810,35 @@ export async function ask(question, scope = 'auto') {
 }
 
 /* ── Suggested follow-ups (Acrobat AI Assistant style) ──────────────────── */
+
+const EDIT_INTENT = new RegExp([
+  '\\b(add|insert|put|number|stamp)\\b[^.?]{0,40}\\bpage numbers?\\b',
+  '\\bpage numbers?\\b[^.?]{0,30}\\b(add|insert|put)\\b',
+  '\\b(make|turn|set|change|recolou?r|colou?r)\\b[^.?]{0,60}\\b(blue|red|green|black|white|grey|gray|yellow|orange|purple|violet|pink|brown|cyan|magenta|colou?r)\\b',
+  '\\bwatermarks?\\b',
+  '\\b(add|insert|put|change)\\b[^.?]{0,30}\\b(headers?|footers?)\\b',
+  '\\b(make|turn)\\b[^.?]{0,40}\\b(bigger|smaller|larger|bold|italics?|underlined|uppercase|lowercase)\\b',
+  '\\b(rotate|delete|remove|reorder|re-order)\\b[^.?]{0,30}\\b(pages?|sheet)\\b',
+  '\\breplace\\b.*\\bwith\\b',
+].join('|'), 'i');
+
+/** Heuristic only: it decides whether to OFFER a plan, never whether to run one. */
+export function looksLikeEditRequest(text) {
+  return EDIT_INTENT.test(String(text || ''));
+}
+
+function renderEditOffer(node, question) {
+  const wrap = el('div', { class: 'ai-followups ai-edit-offer' });
+  wrap.appendChild(el('button', {
+    class: 'ai-chip agent',
+    text: '✎ Do it — plan this edit',
+    title: 'Edit mode: the AI reads the document and proposes an edit plan you approve before anything changes.',
+    onclick: () => { if (!state.ai.busy) { state.ai.mode = 'agent'; runAgentSafe(question); } },
+  }));
+  node.appendChild(wrap);
+  const host = node.closest('.ai-msgs');
+  if (host) host.scrollTop = host.scrollHeight;
+}
 
 function renderFollowups(node, questions, scope) {
   if (!node || !questions.length) return;
@@ -794,11 +858,11 @@ function renderFollowups(node, questions, scope) {
 
 async function suggestFollowups(node, question, answer, scope) {
   try {
-    const out = await chatComplete([
+    const reply = await chatComplete([
       { role: 'system', content: 'Given a question and its answer about a document, propose exactly 3 short follow-up questions the user would most likely ask next. Return ONLY a JSON array of strings — no commentary.' },
       { role: 'user', content: `QUESTION: ${question}\n\nANSWER: ${String(answer).slice(0, 3000)}\n\nReturn ONLY the JSON array.` },
     ], { temperature: 0.4, maxTokens: 220 });
-    renderFollowups(node, normalizeFollowups(extractJson(out, 'array')), scope);
+    renderFollowups(node, normalizeFollowups(extractJson(completionText(reply), 'array')), scope);
   } catch { /* follow-ups are best-effort */ }
 }
 
@@ -835,10 +899,11 @@ export async function outline() {
   state.ai.busy = true;
   renderThinking(aiEl, true);
   try {
-    const text = await chatComplete([
+    const reply = await chatComplete([
       { role: 'system', content: 'You map document structure. Return ONLY a JSON array of nodes: {"level": 1|2|3, "text": "<section title>", "page": <1-based page where the section starts>}. Level 1 = top-level sections. Cover the whole document in reading order. No markdown, no commentary — ONLY the JSON array.' },
       { role: 'user', content: `DOCUMENT CONTEXT\n${fenceDocument(ctx.text)}\n\nProduce the outline.` },
     ], { temperature: 0.2, maxTokens: 1600 });
+    const text = completionText(reply);
     const nodes = normalizeOutline(extractJson(text, 'array'), doc.numPages);
     if (nodes.length) renderOutlineTree(aiEl, nodes);
     else renderAnswer(aiEl, text || '(no response)', ctx.pages);
@@ -1031,8 +1096,10 @@ export function renderAIDock() {
         html: !doc
           ? 'Open a PDF to start.'
           : agentMode
-            ? 'The agent can <b>read, search, OCR and edit</b> this PDF directly — add text, replace words, highlight, redact, rotate or delete pages, set metadata.<br/>Every edit is undoable with Ctrl+Z.'
-            : 'Ask anything about this document.<br/>Answers cite the exact page they came from — click a citation to jump there.',
+            ? (settings.aiPlanFirst !== false
+              ? 'Describe a change in plain language — <b>“add page numbers”</b>, <b>“make the title blue”</b>, <b>“add a DRAFT watermark”</b>, <b>“replace Acme with Globex everywhere”</b>.<br/>The AI reads the document and proposes an <b>edit plan</b>; nothing changes until you approve it, and every applied edit is undoable with Ctrl+Z.'
+              : 'The agent can <b>read, search, OCR and edit</b> this PDF directly — add text, replace words, highlight, redact, rotate or delete pages, set metadata.<br/>Every edit is undoable with Ctrl+Z.')
+            : 'Ask anything about this document.<br/>Answers cite the exact page they came from — click a citation to jump there.<br/>To <b>change</b> the PDF, switch to <b>Edit</b> and describe the change.',
       }),
     ]));
   } else {
@@ -1065,9 +1132,12 @@ export function renderAIDock() {
   if (![...scope.options].some((o) => o.value === scope.value)) scope.value = 'page';
   scope.onchange = () => { settings.ai.defaultScope = scope.value; saveSettings(); };
 
-  /* Ask ⇄ Agent mode switch. In Agent mode the model plans and edits the PDF
-     itself through tools; the scope selector does not apply. */
+  /* Ask ⇄ Edit (agent) mode switch — always visible, in both modes. In Edit
+     mode the model plans the change and edits the PDF (through a plan you
+     approve when aiPlanFirst is on, directly through tools otherwise); the
+     scope selector applies to Ask mode only. */
   const mode = state.ai.mode === 'agent' ? 'agent' : 'chat';
+  const planFirst = settings.aiPlanFirst !== false;
   const askModeBtn = el('button', {
     class: 'ai-mode-btn' + (mode === 'chat' ? ' on' : ''),
     text: 'Ask',
@@ -1075,8 +1145,10 @@ export function renderAIDock() {
   });
   const agentModeBtn = el('button', {
     class: 'ai-mode-btn agent' + (mode === 'agent' ? ' on' : ''),
-    html: svgIcon('ai', 12, 1.6) + '<span>Agent</span>',
-    title: 'Agentic mode: the AI reads, writes and edits the PDF directly via tools. Every edit is undoable.',
+    html: svgIcon('ai', 12, 1.6) + '<span>Edit</span>',
+    title: planFirst
+      ? 'Edit mode: describe a change in plain language — the AI proposes an edit plan you approve before anything changes. (Ctrl+Alt+A)'
+      : 'Edit (agent) mode: the AI reads, writes and edits the PDF directly via tools. Every edit is undoable. (Ctrl+Alt+A)',
   });
   const modeSwitch = el('div', { class: 'ai-mode' }, [askModeBtn, agentModeBtn]);
   const setMode = (m) => { state.ai.mode = m; renderAIDock(); };
@@ -1085,16 +1157,32 @@ export function renderAIDock() {
 
   const quick = mode === 'agent'
     ? el('div', { class: 'ai-actions' }, [
-        el('button', { class: 'ai-chip', text: 'Summarise into a note on p.1', onclick: () => runAgentSafe('Read the document, then add a textbox on page 1 containing a concise summary (title + 3-5 bullet points).') }),
-        el('button', { class: 'ai-chip', text: 'Highlight key terms', onclick: () => runAgentSafe('Find the key terms (dates, amounts, obligations, parties) in this document and highlight them.') }),
-        el('button', { class: 'ai-chip', text: 'Redact emails & phones', onclick: () => runAgentSafe('Find every email address and phone number in the document and mark redactions over them.') }),
-        el('button', { class: 'ai-chip', text: 'Fix the title page', onclick: () => runAgentSafe('Show me the title page text, then replace the title with a corrected, properly capitalised version.') }),
-        el('button', { class: 'ai-chip', text: 'OCR & outline a scan', onclick: () => runAgentSafe('Run OCR on the scanned pages, then give me an outline of the document with page numbers.') }),
+        ...(planFirst ? [
+          el('button', { class: 'ai-chip', text: 'Add page numbers', onclick: () => runAgentSafe('Add page numbers to every page, in the footer, as “Page 1 of N”.') }),
+          el('button', { class: 'ai-chip', text: 'Make the title blue', onclick: () => runAgentSafe('Make the document title on page 1 blue (#1d4ed8) without changing its wording.') }),
+          el('button', { class: 'ai-chip', text: 'Add a DRAFT watermark', onclick: () => runAgentSafe('Add a diagonal “DRAFT” text watermark to every page, drawn behind the content.') }),
+          el('button', { class: 'ai-chip', text: 'Add a footer', onclick: () => runAgentSafe('Add a footer to every page that reads “Confidential”.') }),
+          el('button', { class: 'ai-chip', text: 'Summarise into a note', onclick: () => runAgentSafe('Read the document, then add a sticky note on page 1 containing a concise summary (title + 3-5 bullet points).') }),
+          el('button', { class: 'ai-chip', text: 'Redact emails & phones', onclick: () => runAgentSafe('Find every email address and phone number in the document and mark redactions over them.') }),
+          el('button', { class: 'ai-chip', text: 'OCR a scan', onclick: () => runAgentSafe('Run OCR on the scanned pages, then tell me what the document says.') }),
+        ] : [
+          el('button', { class: 'ai-chip', text: 'Summarise into a note on p.1', onclick: () => runAgentSafe('Read the document, then add a textbox on page 1 containing a concise summary (title + 3-5 bullet points).') }),
+          el('button', { class: 'ai-chip', text: 'Highlight key terms', onclick: () => runAgentSafe('Find the key terms (dates, amounts, obligations, parties) in this document and highlight them.') }),
+          el('button', { class: 'ai-chip', text: 'Redact emails & phones', onclick: () => runAgentSafe('Find every email address and phone number in the document and mark redactions over them.') }),
+          el('button', { class: 'ai-chip', text: 'Fix the title page', onclick: () => runAgentSafe('Show me the title page text, then replace the title with a corrected, properly capitalised version.') }),
+          el('button', { class: 'ai-chip', text: 'OCR & outline a scan', onclick: () => runAgentSafe('Run OCR on the scanned pages, then give me an outline of the document with page numbers.') }),
+        ]),
         el('button', {
           class: 'ai-chip' + (settings.ai.smartContext ? ' on' : ''),
           text: settings.ai.smartContext ? 'Smart context: on' : 'Smart context: off',
           title: 'When on, only the pages most relevant to your question are sent to the model.',
           onclick: () => { settings.ai.smartContext = !settings.ai.smartContext; saveSettings(); renderAIDock(); },
+        }),
+        el('button', {
+          class: 'ai-chip' + (settings.ai.aiVisualContext !== false ? ' on' : ''),
+          text: settings.ai.aiVisualContext !== false ? 'Visual context: on' : 'Visual context: off',
+          title: 'When on, Anna may receive consented page images to identify titles, layout and scanned text.',
+          onclick: () => { settings.ai.aiVisualContext = settings.ai.aiVisualContext === false; saveSettings(); renderAIDock(); },
         }),
       ])
     : el('div', { class: 'ai-actions' }, [
@@ -1117,10 +1205,14 @@ export function renderAIDock() {
         }),
       ]);
 
-  if (mode === 'agent') input.placeholder = 'Tell the agent what to do — it can read, search, OCR and edit this PDF…  (Ctrl+Enter)';
+  if (mode === 'agent') {
+    input.placeholder = planFirst
+      ? 'Describe the change — “add page numbers”, “make the title blue”, “add a DRAFT watermark”…  (Ctrl+Enter)'
+      : 'Tell the agent what to do — it can read, search, OCR and edit this PDF…  (Ctrl+Enter)';
+  }
 
-  const send = el('button', { class: 'mini-btn primary', text: mode === 'agent' ? 'Run' : 'Send' });
-  const row = el('div', { class: 'flex' }, [send, el('span', { class: 'st-grow' }), mode === 'agent' ? modeSwitch : scope]);
+  const send = el('button', { class: 'mini-btn primary', text: mode === 'agent' ? 'Plan it' : 'Send' });
+  const row = el('div', { class: 'flex' }, [send, el('span', { class: 'st-grow' }), modeSwitch, mode === 'agent' ? null : scope].filter(Boolean));
   dock.appendChild(el('div', { class: 'ai-input' }, [quick, input, row]));
 
   const doSend = () => {
@@ -1413,6 +1505,31 @@ export async function configureAI(firstTime = false) {
         highlightModel();
       };
 
+      const localBtn = el('button', { class: 'mini-btn', text: 'Detect local AI', title: 'Find Ollama or LM Studio on this computer' });
+      const localStatus = el('div', { class: 'hint', text: 'Runs on your computer — no API key and no document upload.', style: { flex: '1' } });
+      b.appendChild(el('div', { class: 'flex', style: { gap: '8px', alignItems: 'center', marginBottom: '8px' } }, [localBtn, localStatus]));
+      localBtn.onclick = async () => {
+        localBtn.disabled = true;
+        localStatus.textContent = 'Looking for Ollama or LM Studio…';
+        const found = await detectLocalAi();
+        if (!found) {
+          localStatus.textContent = 'No local model found. Start Ollama or LM Studio, then retry.';
+          localBtn.disabled = false;
+          return;
+        }
+        Object.assign(a, applyLocalAiSettings(found, a));
+        url.value = a.baseUrl;
+        model.value = a.model;
+        key.value = '';
+        authMode.value = 'none';
+        const index = presets.findIndex((item) => item.provider === found.provider);
+        if (index >= 0) preset.value = String(index);
+        renderModelBox(found.models);
+        sync();
+        localStatus.textContent = `✓ ${found.provider === 'ollama' ? 'Ollama' : 'LM Studio'} connected — ${found.models.length} model(s) available.`;
+        localBtn.disabled = false;
+      };
+
       b.appendChild(el('div', { class: 'hint', text: 'Connection' }));
       b.appendChild(formRow('Preset', preset).row);
       b.appendChild(formRow('Base URL', url).row);
@@ -1464,7 +1581,7 @@ export async function configureAI(firstTime = false) {
       b.appendChild(el('div', { class: 'flex', style: { gap: '8px', alignItems: 'center', marginTop: '4px' } }, [testBtn, status]));
       b.appendChild(el('div', {
         class: 'hint',
-        text: 'The key is stored in this app’s local settings file. No data is sent anywhere until you ask a question.',
+        text: 'Desktop keys are encrypted with the operating system. Web keys stay in memory for this tab only and are cleared on refresh. No data is sent anywhere until you ask a question.',
       }));
 
       /* ── Wiring ── */

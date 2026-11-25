@@ -1191,7 +1191,7 @@ async function applyStamp(doc, page, st, ctx) {
         const rad = ((st.angle ?? -45) * Math.PI) / 180;
         const bx = pw / 2 - (w / 2) * Math.cos(rad), by = ph / 2 - (w / 2) * Math.sin(rad) - size * 0.3;
         const content = `q BT /${font.name} ${n(size)} Tf ${n(col.red)} ${n(col.green)} ${n(col.blue)} rg ` +
-          `${n(Math.cos(rad))} ${n(Math.sin(rad))} ${n(-Math.sin(rad))} ${n(Math.cos(rad))} ${n(bx)} ${n(by)} Tm (${txt.replace(/([\\()])/g, '\\$1')}) Tj ET Q`;
+          `${n(Math.cos(rad))} ${n(Math.sin(rad))} ${n(-Math.sin(rad))} ${n(Math.cos(rad))} ${n(bx)} ${n(by)} Tm ${font.encodeText(txt)} Tj ET Q`;
         const ref = makeFormXObject(doc, content, [0, 0, pw, ph], { Font: { [font.name]: font.ref } });
         prependContent(doc, page, ref);
       } else push();
@@ -1217,7 +1217,7 @@ async function applyStamp(doc, page, st, ctx) {
     if (part.align === 'center') x = (pw - w) / 2;
     else if (part.align === 'right') x = pw - margin - w;
     content += `BT /${font.name} ${n(size)} Tf ${n(col.red)} ${n(col.green)} ${n(col.blue)} rg ` +
-      `1 0 0 1 ${n(x)} ${n(y)} Tm (${txt.replace(/([\\()])/g, '\\$1')}) Tj ET `;
+      `1 0 0 1 ${n(x)} ${n(y)} Tm ${font.encodeText(txt)} Tj ET `;
   }
   content += 'Q';
 
@@ -1244,7 +1244,7 @@ function textOp(font, text, o) {
   const tm = rad
     ? `${n(Math.cos(rad))} ${n(Math.sin(rad))} ${n(-Math.sin(rad))} ${n(Math.cos(rad))} ${n(o.x)} ${n(o.y)}`
     : `1 0 0 1 ${n(o.x)} ${n(o.y)}`;
-  return `q BT /${font.name} ${n(size)} Tf ${n(c.red)} ${n(c.green)} ${n(c.blue)} rg ${tm} Tm (${String(text).replace(/([\\()])/g, '\\$1')}) Tj ET Q`;
+  return `q BT /${font.name} ${n(size)} Tf ${n(c.red)} ${n(c.green)} ${n(c.blue)} rg ${tm} Tm ${font.encodeText(String(text))} Tj ET Q`;
 }
 function rectOp(o) {
   const c = o.color || rgb(0, 0, 0);

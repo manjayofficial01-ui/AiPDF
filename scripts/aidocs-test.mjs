@@ -17,7 +17,7 @@ import { PDFDocument as PdfLibDoc, StandardFonts, rgb } from '@cantoo/pdf-lib';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 import {
-  extractJson, normalizeFollowups, normalizeOutline, normalizeContract, normalizePiiCandidates,
+  extractJson, completionText, normalizeFollowups, normalizeOutline, normalizeContract, normalizePiiCandidates,
 } from '../src/renderer/js/aijson.js';
 import {
   PII_TYPES, DEFAULT_CATEGORIES, luhn, scanForPii, mergePii, pageTextMap, findRects,
@@ -34,6 +34,14 @@ function t(name, fn) {
 }
 
 /* ── aijson: JSON recovery from messy model output ──────────────────────── */
+
+await t('completionText: accepts legacy strings and current chat completion objects', () => {
+  assert.equal(completionText('plain reply'), 'plain reply');
+  assert.equal(completionText({ text: '{"ok":true}', toolCalls: [] }), '{"ok":true}');
+  assert.equal(completionText({ content: 'content reply' }), 'content reply');
+  assert.equal(completionText(null), '');
+  assert.equal(completionText({ text: 42 }), '');
+});
 
 await t('extractJson: plain array', () => {
   assert.deepEqual(extractJson('[1,2,3]', 'array'), [1, 2, 3]);

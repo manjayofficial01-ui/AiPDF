@@ -1,4 +1,4 @@
-import { state, settings, saveSettings, activeDoc, updateAnnot, pushHistory, emit, on } from './store.js';
+import { state, settings, saveSettings, activeDoc, updateAnnot, pushHistory, emit, on, canCommitDocMutation } from './store.js';
 import {
   pageEl, getTextContent, toPdf, toCss, currentScale,
 } from './viewer.js';
@@ -219,14 +219,13 @@ function onMarqueeDown(e) {
  * recognition result is used instead. `source` is reported so the UI can say
  * which one it is showing, and offer to recognise when there is neither.
  */
-export async function editableSource(pageIndex) {
-  const doc = activeDoc();
+export async function editableSource(pageIndex, doc = activeDoc()) {
   if (!doc?.pdf || pageIndex < 0 || pageIndex >= doc.numPages) return { blocks: [], source: 'none' };
   const width = doc.pageSizes?.[pageIndex]?.w || 595;
   const height = doc.pageSizes?.[pageIndex]?.h || 842;
   const region = currentRegionRect(pageIndex);
   try {
-    const tc = await getTextContent(pageIndex);
+    const tc = await getTextContent(pageIndex, doc);
     /* Area Direct Edit is clipped at GLYPH level, not item level. pdf.js hands
      * us one TextItem per drawn run — usually a WHOLE LINE — so the old
      * "item centre inside the box" test made that entire line editable, words
@@ -497,8 +496,8 @@ function splitOcrBlocksByCells(flat, blocks, pageWidth, pageIndex) {
   return { blocks: out, tables };
 }
 
-export async function editableBlocks(pageIndex) {
-  return (await editableSource(pageIndex)).blocks;
+export async function editableBlocks(pageIndex, doc = activeDoc()) {
+  return (await editableSource(pageIndex, doc)).blocks;
 }
 
 /** Table structure for a page. Detection is geometry-only and cheap; the block
@@ -910,12 +909,13 @@ const BLOCK_FIELDS = ['text', 'size', 'color', 'maxWidth', 'maxHeight', 'align',
  * whites out the rest of a run without redrawing it. One block has one pending
  * edit, updated in place. Undo still records each commit separately. */
 export async function commitBlockEdit(pageIndex, block, nextText, options = {}) {
-  const doc = activeDoc();
+  const doc = options.doc || activeDoc();
   // OCR blocks have no pdf.js item indices — they are identified by `key` and
   // their own line ids, so requiring indices here silently dropped every edit
   // made on a recognised page.
   const isOcr = block?.kind === 'o';
-  if (!doc || !block || (!isOcr && !block.itemIndices?.length)) return false;
+  if (!doc || activeDoc() !== doc || !canCommitDocMutation(doc, options.transactionToken)
+    || !block || (!isOcr && !block.itemIndices?.length)) return false;
   if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= doc.numPages) return false;
   const existing = editForBlock(doc, pageIndex, block);
   const text = String(nextText ?? '');
@@ -1058,9 +1058,15 @@ export async function commitBlockEdit(pageIndex, block, nextText, options = {}) 
   // already belongs to (the context panel can move it explicitly).
   if (existing) edit.layer = existing.layer || edit.layer || null;
   else edit.layer = doc.activeLayer || null;
+  // Final mutation boundary: never apply a block captured from one document to
+  // whichever document became active while asynchronous extraction was running.
+  if (activeDoc() !== doc || !canCommitDocMutation(doc, options.transactionToken)) return false;
   if (existing) Object.assign(existing, edit);
   else doc.textEdits.push(edit);
-  pushHistory(options.label || 'direct edit');
+  // Transactional AI plans mutate the model first and commit only after the
+  // candidate bytes verify. Keep the normal Direct Editor side effects intact
+  // for every other caller.
+  if (!options.deferCommit) pushHistory(options.label || 'direct edit', doc);
   // A Direct Editor commit IS a text box laid over the original text — never a
   // removal of the model record. The edit record keeps the mapping back to the
   // original run (so text extraction, search and re-editing still resolve it),
@@ -1071,10 +1077,12 @@ export async function commitBlockEdit(pageIndex, block, nextText, options = {}) 
   // the writer into its frame chain, so it carries no single box — one box could
   // not express text continuing onto another page.
   const boxId = (edit.frames && edit.frames.length > 1) ? null : syncEditBox(doc, edit, pageIndex);
-  if (boxId) state.selection = [boxId];
-  renderPageAnnotations(pageIndex);
-  emit('annots');
-  emit('selection');
+  if (!options.deferCommit) {
+    if (boxId) state.selection = [boxId];
+    renderPageAnnotations(pageIndex);
+    emit('annots');
+    emit('selection');
+  }
   return true;
 }
 
@@ -1094,14 +1102,15 @@ export async function commitBlockEdit(pageIndex, block, nextText, options = {}) 
  * necessarily the paragraph width the user wants, and adjustable afterwards.
  */
 export async function mergeBlocksIntoParagraph(pageIndex, blockIndices, opts = {}) {
-  const doc = activeDoc();
+  const doc = opts.doc || activeDoc();
   if (!doc) return false;
-  const blocks = await editableBlocks(pageIndex);
+  const blocks = await editableBlocks(pageIndex, doc);
+  if (activeDoc() !== doc) return false;
   const picks = (blockIndices || []).map((i) => blocks[i]).filter(Boolean);
   if (!picks.length) return false;
   if (picks.length === 1) {
     const b = picks[0];
-    return commitBlockEdit(pageIndex, b, opts.text ?? blockText(doc, pageIndex, b), { ...opts, mode: 'flow' });
+    return commitBlockEdit(pageIndex, b, opts.text ?? blockText(doc, pageIndex, b), { ...opts, doc, mode: 'flow' });
   }
   const items = picks.map((b) => {
     const prior = editForBlock(doc, pageIndex, b);
@@ -1145,7 +1154,7 @@ export async function mergeBlocksIntoParagraph(pageIndex, blockIndices, opts = {
     fontFamily: story.style.fontFamily,
   };
   return commitBlockEdit(pageIndex, synthetic, story.text, {
-    ...opts, mode: 'flow',
+    ...opts, doc, mode: 'flow',
     frames: [{ page: pageIndex, rect: rect.slice() }],
     // Excise each source rect separately, never one big union: the user may have
     // selected lines 1 and 3 and skipped line 2, and a union would delete a line
@@ -1356,7 +1365,7 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
   closeActive();
   const doc = activeDoc(), rec = pageEl(pageIndex);
   if (!doc || !rec) return null;
-  const blocks = await editableBlocks(pageIndex);
+  const blocks = await editableBlocks(pageIndex, doc);
   const block = blocks[blockIndex];
   if (!block || doc !== activeDoc()) return null;
 
@@ -1521,6 +1530,7 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
     // Re-probe against the text being committed, not the text the block opened
     // with: the user may have typed a character the original never contained.
     fontCap = await probeFontCapability(finalFamily, text, doc.bytes);
+    if (doc !== activeDoc()) { closeActive(); return; }
     if (fontCap.missing.length) {
       const proceed = await confirmDialog(
         `"${finalFamily}" has no glyph for ${describeMissing(fontCap.missing)}.`
@@ -1530,6 +1540,7 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
       );
       if (!proceed) { surface.focus(); return; }
     }
+    if (doc !== activeDoc()) { closeActive(); return; }
     const finalSize = fmt.size != null ? fmt.size : size;
     const spacing = fmt.lineSpacing != null ? Number(fmt.lineSpacing) : Number(overlay.dataset.lineSpacing || 1.2);
     const leading = leadingFor(finalSize, spacing);
@@ -1549,6 +1560,7 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
     const minW = region ? 4 : 20;
     const maxWidth = clamp(width, minW, Math.max(minW, rightLimit));
     await commitBlockEdit(pageIndex, block, text, {
+      doc,
       size: finalSize, color: fmt.color || color, maxWidth, maxHeight, fontFamily: finalFamily,
       align: fmt.align, bold: fmt.bold, italic: fmt.italic, underline: fmt.underline,
       lineHeight: leading, charSpacing: fmt.charSpacing, hScale: fmt.hScale,
@@ -1605,7 +1617,7 @@ export async function openEditorForEdit(pageIndex, eid, opts = {}) {
   const doc = activeDoc();
   const ed = doc?.textEdits.find((x) => x.id === eid);
   if (!ed) return null;
-  const blocks = await editableBlocks(pageIndex);
+  const blocks = await editableBlocks(pageIndex, doc);
   let bi = ed.key ? blocks.findIndex((b) => b.key === ed.key) : -1;
   if (bi < 0 && ed.itemIndices?.length) {
     const ids = new Set(ed.itemIndices);

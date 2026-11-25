@@ -9,34 +9,23 @@
  * not to see anyone's data: requests come from the user's own session with
  * the user's own keys, addressed to the endpoint the user configured.
  *
- * Guardrails: https targets only, public hosts only (no loopback, no private
- * ranges, no cloud metadata endpoints), GET/POST only, 32 MB response cap.
- * DNS rebinding is the accepted residual risk of a hostname check on
- * serverless; the desktop app carries the same design (it resolves nothing
- * either) and the worst case is a relayed call the user themselves asked for.
+ * Guardrails: https targets only, built-in/configured provider allowlist,
+ * short-lived host-bound HMAC token, per-instance rate limit, GET/POST only,
+ * and a 32 MB response cap. DNS rebinding remains a residual serverless risk,
+ * but the relay is no longer a generic public forwarding service.
  */
+
+const {
+  extraHostsFromEnv,
+  isAllowedRelayTarget,
+  verifyRelayToken,
+  createRateLimiter,
+  clientKey,
+} = require('./relay-policy.js');
 
 const RESPONSE_CAP = 32 * 1024 * 1024;
 const ALLOWED_METHODS = new Set(['GET', 'POST']);
-
-function isPrivateHost(hostname) {
-  const h = String(hostname || '').toLowerCase();
-  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
-  if (h === 'metadata.google.internal' || h.endsWith('.svc') || h.endsWith('.svc.cluster.local')) return true;
-  const ipv4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4) {
-    const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
-    if (a === 127 || a === 10 || a === 0) return true;
-    if (a === 169 && b === 254) return true; // link-local / cloud metadata
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-    if (a >= 224) return true; // multicast / reserved
-    return false;
-  }
-  if (h.startsWith('[') || h === '::1' || h === '::') return true; // IPv6 loopback-ish
-  return false;
-}
+const relayLimiter = createRateLimiter({ limit: 120, windowMs: 60_000 });
 
 /** Never forward hop-by-hop or identity headers; everything else passes. */
 function filterHeaders(headers) {
@@ -64,6 +53,17 @@ module.exports = async function handler(req, res) {
     return;
   }
 
+  const rate = relayLimiter(clientKey(req));
+  if (!rate.ok) {
+    res.setHeader('Retry-After', String(Math.ceil(rate.retryAfterMs / 1000)));
+    res.status(429).json({ ok: false, error: 'Relay rate limit exceeded.' });
+    return;
+  }
+  if (!process.env.AIPDF_RELAY_SECRET) {
+    res.status(503).json({ ok: false, error: 'Relay signing is not configured.' });
+    return;
+  }
+
   let target;
   try { target = new URL(String(payload.url || '')); } catch {
     res.status(400).json({ ok: false, error: 'The relay target must be an absolute URL.' });
@@ -78,8 +78,13 @@ module.exports = async function handler(req, res) {
     res.status(400).json({ ok: false, error: 'Only GET and POST are relayed.' });
     return;
   }
-  if (isPrivateHost(target.hostname)) {
-    res.status(403).json({ ok: false, error: 'The relay does not forward to private addresses.' });
+  if (!isAllowedRelayTarget(target.toString(), extraHostsFromEnv())) {
+    res.status(403).json({ ok: false, error: 'The relay target is not allowed.' });
+    return;
+  }
+  const verdict = verifyRelayToken(payload.relayToken, target.toString());
+  if (!verdict.ok) {
+    res.status(401).json({ ok: false, error: 'A valid relay token is required.' });
     return;
   }
 
